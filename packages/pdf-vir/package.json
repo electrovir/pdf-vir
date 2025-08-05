@@ -1,0 +1,69 @@
+{
+    "name": "pdf-vir",
+    "version": "0.0.1",
+    "description": "Custom element for rendering PDFs.",
+    "keywords": [
+        "pdf",
+        "viewer",
+        "render"
+    ],
+    "homepage": "https://github.com/electrovir/pdf-vir",
+    "bugs": {
+        "url": "https://github.com/electrovir/pdf-vir/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/electrovir/pdf-vir.git"
+    },
+    "license": "(MIT or CC0 1.0)",
+    "author": {
+        "name": "electrovir",
+        "url": "https://github.com/electrovir"
+    },
+    "sideEffects": false,
+    "type": "module",
+    "main": "src/index.ts",
+    "module": "src/index.ts",
+    "types": "src/index.ts",
+    "scripts": {
+        "build": "virmator frontend build",
+        "compile": "virmator compile",
+        "docs": "virmator docs",
+        "start": "virmator frontend",
+        "test": "exit 0",
+        "test:coverage": "npm run test",
+        "test:docs": "virmator docs check",
+        "test:update": "npm test update"
+    },
+    "dependencies": {
+        "@augment-vir/assert": "^31.30.1",
+        "@augment-vir/common": "^31.30.1"
+    },
+    "devDependencies": {
+        "@augment-vir/test": "^31.27.0",
+        "@web/dev-server-esbuild": "^1.0.4",
+        "@web/test-runner": "^0.20.2",
+        "@web/test-runner-commands": "^0.9.0",
+        "@web/test-runner-playwright": "^0.11.1",
+        "@web/test-runner-visual-regression": "^0.10.0",
+        "element-vir": "^26.7.1",
+        "istanbul-smart-text-reporter": "^1.1.5",
+        "markdown-code-example-inserter": "^3.0.3",
+        "pdfjs-dist": "^5.4.54",
+        "typedoc": "^0.28.9",
+        "typescript": "^5.9.2",
+        "vira": "^26.7.1",
+        "vite": "^7.0.6"
+    },
+    "peerDependencies": {
+        "element-vir": ">=26",
+        "pdfjs-dist": ">=5",
+        "vira": ">=26"
+    },
+    "engines": {
+        "node": ">=22"
+    },
+    "publishConfig": {
+        "access": "public"
+    }
+}
