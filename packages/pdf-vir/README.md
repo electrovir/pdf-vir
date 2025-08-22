@@ -23,7 +23,7 @@ export const MyApp = defineElement()({
     render() {
         return html`
             <${PdfVir.assign({
-                pdfPath: '/my-file.pdf',
+                pdfSource: '/my-file.pdf',
 
                 pdfJsWorkerPath: '/pdf.worker.mjs',
             })}></${PdfVir}>

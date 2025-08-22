@@ -16,7 +16,7 @@ export const VirDemo = defineElement()({
     `,
     render() {
         return html`
-            <${PdfVir.assign({pdfPath: '/demo.pdf', pdfJsWorkerPath: '/pdf.worker.mjs'})}
+            <${PdfVir.assign({pdfSource: '/demo.pdf', pdfJsWorkerPath: '/pdf.worker.mjs'})}
                 ${listen(PdfVir.events.canvasLoad, (event) => {
                     const {context, pageNumber} = event.detail;
 
