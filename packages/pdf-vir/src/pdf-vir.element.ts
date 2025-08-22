@@ -14,7 +14,30 @@ import {
 } from 'element-vir';
 import * as pdfjs from 'pdfjs-dist';
 import {GlobalWorkerOptions, type PDFDocumentProxy} from 'pdfjs-dist';
+import {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
 import {LoaderAnimated24Icon, ViraIcon} from 'vira';
+
+export {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
+
+/**
+ * All options for the PDF `pdfSource` property in {@link PdfVirInputs}.
+ *
+ * @category Internal
+ */
+export type PdfSource =
+    | string
+    | URL
+    | Int8Array
+    | Uint8Array
+    | Uint8ClampedArray
+    | Int16Array
+    | Uint16Array
+    | Int32Array
+    | Uint32Array
+    | Float32Array
+    | Float64Array
+    | ArrayBuffer
+    | DocumentInitParameters;
 
 /**
  * All inputs for {@link PdfVir}.
@@ -22,7 +45,16 @@ import {LoaderAnimated24Icon, ViraIcon} from 'vira';
  * @category Internal
  */
 export type PdfVirInputs = {
-    pdfPath: string;
+    /**
+     * This is the main entry point for loading a PDF.
+     *
+     * If a URL is used to fetch the PDF data a standard Fetch API call (or XHR as fallback) is
+     * used, which means it must follow same origin rules, e.g. no cross-domain requests without
+     * CORS.
+     *
+     * @see `getDocument` at https://mozilla.github.io/pdf.js/api/
+     */
+    pdfSource: PdfSource;
     /**
      * Used to set `GlobalWorkerOptions.workerSrc` on the PDFJs library. This is required or the
      * library simply crashes. This should be a string containing the path and filename of the
@@ -61,7 +93,7 @@ export type PdfVirElements = 'canvas' | 'canvas-wrapper' | 'loader' | 'error';
 export type PdfLoadEventDetail = {
     pageCount: number;
     pdfDocument: PDFDocumentProxy;
-    pdfPath: string;
+    pdfSource: PdfSource;
 };
 
 /**
@@ -129,10 +161,14 @@ export const PdfVir = defineElement<PdfVirInputs>()({
     state({events, dispatch}) {
         return {
             pdfDocument: asyncProp({
-                async updateCallback({pdfPath}: {pdfPath: string}) {
-                    const pdfDocument = await pdfjs.getDocument(pdfPath).promise;
+                async updateCallback({pdfSource}: {pdfSource: PdfSource}) {
+                    const pdfDocument = await pdfjs.getDocument(pdfSource).promise;
                     dispatch(
-                        new events.pdfLoad({pageCount: pdfDocument.numPages, pdfDocument, pdfPath}),
+                        new events.pdfLoad({
+                            pageCount: pdfDocument.numPages,
+                            pdfDocument,
+                            pdfSource,
+                        }),
                     );
                     return pdfDocument;
                 },
@@ -142,8 +178,8 @@ export const PdfVir = defineElement<PdfVirInputs>()({
     },
     render({state, inputs, dispatch, events}) {
         GlobalWorkerOptions.workerSrc = inputs.pdfJsWorkerPath;
-        const pdfPath = inputs.pdfPath;
-        state.pdfDocument.update({pdfPath: pdfPath});
+        const pdfSource = inputs.pdfSource;
+        state.pdfDocument.update({pdfSource});
 
         if (!state.pdfDocument.settledValue) {
             return html`
@@ -200,7 +236,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                             const renderTask = pdfPage.render({
                                 canvasContext: context,
                                 viewport,
-                                canvas: canvas,
+                                canvas,
                             });
                             await renderTask.promise;
                             dispatch(
@@ -209,7 +245,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                     context,
                                     pageNumber,
                                     pageCount: pdfDocument.numPages,
-                                    pdfPath,
+                                    pdfSource,
                                     pdfDocument,
                                 }),
                             );
