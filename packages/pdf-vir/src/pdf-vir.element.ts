@@ -1,5 +1,10 @@
 import {assert} from '@augment-vir/assert';
-import {createArray, extractErrorMessage, type PartialWithUndefined} from '@augment-vir/common';
+import {
+    createArray,
+    ensureError,
+    extractErrorMessage,
+    type PartialWithUndefined,
+} from '@augment-vir/common';
 import {
     asyncProp,
     attributes,
@@ -157,20 +162,27 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             } & PdfLoadEventDetail
         >(),
         pdfLoad: defineElementEvent<PdfLoadEventDetail>(),
+        pdfError: defineElementEvent<Error>(),
     },
     state({events, dispatch}) {
         return {
             pdfDocument: asyncProp({
                 async updateCallback({pdfSource}: {pdfSource: PdfSource}) {
-                    const pdfDocument = await pdfjs.getDocument(pdfSource).promise;
-                    dispatch(
-                        new events.pdfLoad({
-                            pageCount: pdfDocument.numPages,
-                            pdfDocument,
-                            pdfSource,
-                        }),
-                    );
-                    return pdfDocument;
+                    try {
+                        const pdfDocument = await pdfjs.getDocument(pdfSource).promise;
+                        dispatch(
+                            new events.pdfLoad({
+                                pageCount: pdfDocument.numPages,
+                                pdfDocument,
+                                pdfSource,
+                            }),
+                        );
+                        return pdfDocument;
+                    } catch (caught) {
+                        const error = ensureError(caught);
+                        dispatch(new events.pdfError(error));
+                        throw error;
+                    }
                 },
             }),
             canvasElement: undefined as undefined | HTMLCanvasElement,
