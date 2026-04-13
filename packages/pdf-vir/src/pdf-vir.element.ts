@@ -237,10 +237,13 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                             assert.instanceOf(canvas, HTMLCanvasElement);
 
                             const pdfPage = await pdfDocument.getPage(pageNumber);
-                            const viewport = pdfPage.getViewport({scale: 1});
+                            const dpr = globalThis.devicePixelRatio || 1;
+                            const viewport = pdfPage.getViewport({scale: dpr});
 
                             canvas.width = viewport.width;
                             canvas.height = viewport.height;
+                            canvas.style.width = `${viewport.width / dpr}px`;
+                            canvas.style.height = `${viewport.height / dpr}px`;
                             const context = canvas.getContext('2d');
 
                             assert.isDefined(context);
