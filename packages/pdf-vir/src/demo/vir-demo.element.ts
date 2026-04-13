@@ -6,12 +6,15 @@ export const VirDemo = defineElement()({
     styles: css`
         :host {
             display: flex;
-            align-items: center;
+            align-items: start;
             justify-content: center;
-            max-height: 100%;
-            max-width: 100%;
-            min-height: 100%;
-            min-width: 100%;
+            height: 100%;
+            width: 100%;
+        }
+
+        ${PdfVir} {
+            width: 80%;
+            height: 90%;
         }
     `,
     render() {
