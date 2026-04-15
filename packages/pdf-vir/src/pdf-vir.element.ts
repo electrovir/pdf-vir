@@ -15,7 +15,7 @@ import {
     defineElementEvent,
     html,
     ifDefined,
-    onDomCreated,
+    onResize,
 } from 'element-vir';
 import * as pdfjs from 'pdfjs-dist';
 import {GlobalWorkerOptions, type PDFDocumentProxy} from 'pdfjs-dist';
@@ -101,6 +101,8 @@ export type PdfLoadEventDetail = {
     pdfSource: PdfSource;
 };
 
+const renderStates = new WeakMap<Element, {renderedCssWidth: number; rendering: boolean}>();
+
 /**
  * An element-vir custom-web-element for rendering PDFs inline with HTML.
  *
@@ -160,6 +162,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 canvas: HTMLCanvasElement;
                 context: CanvasRenderingContext2D;
                 pageNumber: number;
+                /**
+                 * The scale factor from PDF coordinate space to canvas pixel space. Multiply
+                 * PDF-space coordinates by this value when drawing on the canvas context.
+                 */
+                scale: number;
             } & PdfLoadEventDetail
         >(),
         pdfLoad: defineElementEvent<PdfLoadEventDetail>(),
@@ -230,45 +237,94 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                     class="canvas-wrapper"
                     ${attributes(inputs.attributePassthrough?.['canvas-wrapper'])}
                     style=${ifDefined(inputs.stylePassthrough?.['canvas-wrapper'])}
+                    ${onResize(async (_resizeEntry, wrapper) => {
+                        const pageNumber = index + 1;
+                        const canvas = wrapper.querySelector('canvas');
+
+                        if (!canvas || !(canvas instanceof HTMLCanvasElement)) {
+                            return;
+                        }
+
+                        const growthThreshold = 1.2;
+                        const renderState = renderStates.get(wrapper) || {
+                            renderedCssWidth: 0,
+                            rendering: false,
+                        };
+                        renderStates.set(wrapper, renderState);
+
+                        if (
+                            renderState.renderedCssWidth > 0 &&
+                            wrapper.clientWidth <= renderState.renderedCssWidth * growthThreshold
+                        ) {
+                            return;
+                        }
+
+                        async function renderPage() {
+                            if (renderState.rendering) {
+                                return;
+                            }
+                            assert.instanceOf(canvas, HTMLCanvasElement);
+                            renderState.rendering = true;
+
+                            try {
+                                const pdfPage = await pdfDocument.getPage(pageNumber);
+                                const dpr = globalThis.devicePixelRatio || 1;
+                                const baseViewport = pdfPage.getViewport({
+                                    scale: 1,
+                                });
+
+                                const targetCssWidth = wrapper.clientWidth || baseViewport.width;
+                                const scale = (targetCssWidth / baseViewport.width) * dpr;
+                                const viewport = pdfPage.getViewport({
+                                    scale,
+                                });
+
+                                canvas.width = viewport.width;
+                                canvas.height = viewport.height;
+                                canvas.style.width = `${viewport.width / dpr}px`;
+
+                                const context = canvas.getContext('2d');
+                                assert.isDefined(context);
+
+                                const renderTask = pdfPage.render({
+                                    canvasContext: context,
+                                    viewport,
+                                    canvas,
+                                });
+                                await renderTask.promise;
+
+                                renderState.renderedCssWidth = viewport.width / dpr;
+
+                                dispatch(
+                                    new events.canvasLoad({
+                                        canvas,
+                                        context,
+                                        pageNumber,
+                                        scale,
+                                        pageCount: pdfDocument.numPages,
+                                        pdfSource,
+                                        pdfDocument,
+                                    }),
+                                );
+                            } finally {
+                                renderState.rendering = false;
+                            }
+
+                            /** Re-render if the wrapper grew during rendering. */
+                            if (
+                                wrapper.clientWidth >
+                                renderState.renderedCssWidth * growthThreshold
+                            ) {
+                                await renderPage();
+                            }
+                        }
+
+                        await renderPage();
+                    })}
                 >
                     <canvas
                         ${attributes(inputs.attributePassthrough?.canvas)}
                         style=${ifDefined(inputs.stylePassthrough?.canvas)}
-                        ${onDomCreated(async (canvas) => {
-                            const pageNumber = index + 1;
-
-                            assert.instanceOf(canvas, HTMLCanvasElement);
-
-                            const pdfPage = await pdfDocument.getPage(pageNumber);
-                            const dpr = globalThis.devicePixelRatio || 1;
-                            const viewport = pdfPage.getViewport({
-                                scale: dpr,
-                            });
-
-                            canvas.width = viewport.width;
-                            canvas.height = viewport.height;
-                            canvas.style.width = `${viewport.width / dpr}px`;
-                            const context = canvas.getContext('2d');
-
-                            assert.isDefined(context);
-
-                            const renderTask = pdfPage.render({
-                                canvasContext: context,
-                                viewport,
-                                canvas,
-                            });
-                            await renderTask.promise;
-                            dispatch(
-                                new events.canvasLoad({
-                                    canvas,
-                                    context,
-                                    pageNumber,
-                                    pageCount: pdfDocument.numPages,
-                                    pdfSource,
-                                    pdfDocument,
-                                }),
-                            );
-                        })}
                     ></canvas>
                 </div>
             `,
