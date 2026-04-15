@@ -129,6 +129,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
         canvas {
             max-width: 100%;
+            height: auto;
             box-sizing: border-box;
         }
 
@@ -191,7 +192,9 @@ export const PdfVir = defineElement<PdfVirInputs>()({
     render({state, inputs, dispatch, events}) {
         GlobalWorkerOptions.workerSrc = inputs.pdfJsWorkerPath;
         const pdfSource = inputs.pdfSource;
-        state.pdfDocument.update({pdfSource});
+        state.pdfDocument.update({
+            pdfSource,
+        });
 
         if (!state.pdfDocument.settledValue) {
             return html`
@@ -238,12 +241,13 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
                             const pdfPage = await pdfDocument.getPage(pageNumber);
                             const dpr = globalThis.devicePixelRatio || 1;
-                            const viewport = pdfPage.getViewport({scale: dpr});
+                            const viewport = pdfPage.getViewport({
+                                scale: dpr,
+                            });
 
                             canvas.width = viewport.width;
                             canvas.height = viewport.height;
                             canvas.style.width = `${viewport.width / dpr}px`;
-                            canvas.style.height = `${viewport.height / dpr}px`;
                             const context = canvas.getContext('2d');
 
                             assert.isDefined(context);

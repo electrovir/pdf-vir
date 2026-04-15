@@ -1,6 +1,6 @@
 {
     "name": "pdf-vir",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Custom element for rendering PDFs.",
     "keywords": [
         "pdf",
