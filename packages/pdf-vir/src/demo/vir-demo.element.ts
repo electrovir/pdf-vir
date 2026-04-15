@@ -35,13 +35,13 @@ export const VirDemo = defineElement()({
                 },
             })}
                 ${listen(PdfVir.events.canvasLoad, (event) => {
-                    const {context, pageNumber, scale} = event.detail;
+                    const {context, pageNumber} = event.detail;
 
                     if (pageNumber === 1) {
                         context.beginPath();
-                        /** Render a box in PDF-coordinate space, scaled to canvas pixels. */
-                        context.rect(90 * scale, 125 * scale, 210 * scale, 25 * scale);
-                        context.lineWidth = 3 * scale;
+                        /** Render a box. */
+                        context.rect(90, 125, 210, 25);
+                        context.lineWidth = 3;
                         context.strokeStyle = 'red';
                         context.stroke();
                     }
