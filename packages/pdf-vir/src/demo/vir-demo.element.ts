@@ -6,20 +6,34 @@ export const VirDemo = defineElement()({
     styles: css`
         :host {
             display: flex;
-            align-items: start;
-            justify-content: center;
+            flex-direction: column;
+            align-items: center;
             height: 100%;
             width: 100%;
+            padding: 16px;
+            box-sizing: border-box;
         }
 
         ${PdfVir} {
-            width: 80%;
-            height: 90%;
+            flex-grow: 1;
+            box-sizing: border-box;
+            overscroll-behavior: contain;
         }
     `,
     render() {
         return html`
-            <${PdfVir.assign({pdfSource: '/demo.pdf', pdfJsWorkerPath: '/pdf.worker.mjs'})}
+            <${PdfVir.assign({
+                pdfSource: '/demo.pdf',
+                pdfJsWorkerPath: '/pdf.worker.mjs',
+                stylePassthrough: {
+                    'canvas-wrapper': css`
+                        display: flex;
+                    `,
+                    canvas: css`
+                        flex-grow: 1;
+                    `,
+                },
+            })}
                 ${listen(PdfVir.events.canvasLoad, (event) => {
                     const {context, pageNumber} = event.detail;
 
