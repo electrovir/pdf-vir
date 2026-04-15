@@ -306,6 +306,9 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                         pdfDocument,
                                     }),
                                 );
+                            } catch (caught) {
+                                dispatch(new events.pdfError(ensureError(caught)));
+                                return;
                             } finally {
                                 renderState.rendering = false;
                             }
