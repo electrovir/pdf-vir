@@ -1,11 +1,13 @@
 import {assert} from '@augment-vir/assert';
 import {
     createArray,
+    Debounce,
+    DebounceStyle,
     DeferredPromise,
     ensureError,
     extractErrorMessage,
     type PartialWithUndefined,
-    wait,
+    randomString,
 } from '@augment-vir/common';
 import {
     asyncProp,
@@ -18,6 +20,7 @@ import {
     html,
     ifDefined,
     onDomCreated,
+    repeat,
 } from 'element-vir';
 import * as pdfjs from 'pdfjs-dist';
 import {GlobalWorkerOptions, type PDFDocumentProxy} from 'pdfjs-dist';
@@ -70,20 +73,45 @@ export type PdfVirInputs = {
     pdfJsWorkerPath: string;
 } & PartialWithUndefined<{
     /**
-     * The first page number to render.
+     * Caps the pixel count of each rendered page. Pages whose natural size exceeds this cap are
+     * rendered at a lower `scale` so the canvas pixel buffer (width × height × 4 bytes) stays
+     * bounded, which prevents out-of-memory crashes on weak devices.
      *
-     * @default 1 // (the first page)
+     * @default 500_000 // ~2MB of canvas memory per page
      */
-    startPageNumber: number;
-    /**
-     * The number of pages to render.
-     *
-     * @default // the total page count
-     */
-    pageCount: number;
+    maxPixelsPerPage: number;
     stylePassthrough: PartialWithUndefined<Record<PdfVirElements, CSSResult>>;
     attributePassthrough: PartialWithUndefined<Record<PdfVirElements, AttributeValues>>;
 }>;
+
+const defaultMaxPixelsPerPage = 500_000;
+
+/** Defaults applied to {@link pdfjs.getDocument} to keep memory bounded on weak devices: */
+const defaultLoadOptions = {
+    /**
+     * `disableAutoFetch`: pdfjs otherwise prefetches the entire file after the first byte range,
+     * which spikes memory. With this off, pdfjs fetches only the byte ranges it actually needs.
+     */
+    disableAutoFetch: true,
+} as const satisfies DocumentInitParameters;
+
+function toDocumentInitParameters(source: PdfSource): DocumentInitParameters {
+    if (typeof source === 'string' || source instanceof URL) {
+        return {
+            ...defaultLoadOptions,
+            url: source,
+        };
+    } else if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
+        return {
+            ...defaultLoadOptions,
+            data: source,
+        };
+    }
+    return {
+        ...defaultLoadOptions,
+        ...source,
+    };
+}
 
 /**
  * All internal elements of {@link PdfVir} that you can pass styles or attributes to.
@@ -93,15 +121,77 @@ export type PdfVirInputs = {
 export type PdfVirElements = 'canvas' | 'canvas-wrapper' | 'loader' | 'error';
 
 /**
- * Event detail from the `pdfLoad` event and also part of the `canvasLoad` event.
+ * Event detail for the `pdfLoad` event, and also the shared base shape for `canvasCreate` and
+ * `canvasLoad` event details.
  *
  * @category Internal
  */
 export type PdfLoadEventDetail = {
+    /** The total pages in the document. */
     pageCount: number;
     pdfDocument: PDFDocumentProxy;
     pdfSource: PdfSource;
 };
+
+/**
+ * Destroys a settled pdf document (if it is one — skips `undefined` and `Error` settled values),
+ * freeing pdfjs's parsed pages, fonts, and worker-side buffers. Runs in the background; surfaces
+ * any failure through `onError` so callers can dispatch a `pdfError` event.
+ */
+async function destroyPdfDocument(settled: undefined | Error | PDFDocumentProxy) {
+    if (settled && !(settled instanceof Error)) {
+        await settled.destroy();
+    }
+}
+
+/**
+ * Compares two possible pdf sources for equality, covering every variant of {@link PdfSource}:
+ *
+ * - Strings and `URL`s are compared structurally (including cross-type string↔`URL` via `.href`).
+ * - Typed arrays, `ArrayBuffer`s, `DocumentInitParameters`, and any other object types use reference
+ *   equality — hold onto the same instance to avoid re-loading.
+ */
+export function arePdfSourcesEqual(a: undefined | PdfSource, b: undefined | PdfSource): boolean {
+    if (a == undefined || b == undefined) {
+        return a === b;
+    }
+    return toPdfSourceKey(a) === toPdfSourceKey(b);
+}
+
+/**
+ * Module-level registry that assigns a stable string key to each object-typed {@link PdfSource} so
+ * subsequent passes over the same reference produce the same key. A `WeakMap` ensures we don't keep
+ * sources alive once the caller drops them.
+ */
+const pdfSourceRefKeys = new WeakMap<object, string>();
+
+/**
+ * Produces a stable string key for a {@link PdfSource}, matching the semantics of
+ * {@link arePdfSourcesEqual}:
+ *
+ * - Strings and `URL`s collapse to the same `url:` key when their href urls match.
+ * - Typed arrays, `ArrayBuffer`s, and `DocumentInitParameters` objects get a per-reference `ref:` key
+ *   (different references are considered different sources even if their contents match).
+ *
+ * The returned key is suitable for `===` comparison and for use as a lit `repeat` key prefix.
+ *
+ * @category Internal
+ */
+export function toPdfSourceKey(source: PdfSource): string {
+    if (typeof source === 'string') {
+        return `url:${source}`;
+    } else if (source instanceof URL) {
+        return `url:${source.href}`;
+    }
+
+    const existing = pdfSourceRefKeys.get(source);
+    if (existing) {
+        return existing;
+    }
+    const generated = `ref:${randomString()}`;
+    pdfSourceRefKeys.set(source, generated);
+    return generated;
+}
 
 /**
  * An element-vir custom-web-element for rendering PDFs inline with HTML.
@@ -126,7 +216,19 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         .canvas-wrapper {
             position: relative;
             box-sizing: border-box;
-            max-width: 100%;
+            width: 100%;
+            /*
+             * Reserves scroll space for pages whose canvases haven't rendered yet, scaled to the
+             * host's current width (so narrow windows don't leave huge gaps). Uses the US
+             * letter aspect (8.5:11) as a stand-in; actual rendered canvases have their own
+             * intrinsic height and override this ratio once they've drawn.
+             */
+            aspect-ratio: 8.5 / 11;
+        }
+
+        .canvas-wrapper:has(canvas[width]) {
+            /* Stop constraining the aspect once the canvas has real dimensions. */
+            aspect-ratio: auto;
         }
 
         canvas {
@@ -164,17 +266,40 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 pageNumber: number;
             } & PdfLoadEventDetail
         >(),
+        /**
+         * Fires once per page as soon as its `<canvas>` is attached to the DOM — before any PDF
+         * rendering happens. Lets consumers grab the canvas reference (for example to scroll to a
+         * specific page) without having to wait for the page to enter the viewport and render.
+         */
+        canvasCreate: defineElementEvent<
+            {
+                canvas: HTMLCanvasElement;
+                /** The current page that this canvas corresponds to. */
+                pageNumber: number;
+            } & PdfLoadEventDetail
+        >(),
         pdfLoad: defineElementEvent<PdfLoadEventDetail>(),
         pdfError: defineElementEvent<Error>(),
     },
     state({events, dispatch}) {
         return {
             pagePromises: [] as DeferredPromise[],
-            lastSource: undefined as undefined | PdfSource,
+            lastSourceKey: undefined as undefined | string,
+            /** Page indices whose render has been kicked off (or completed). */
+            renderedPages: new Set<number>(),
+            /** Observers that must be disconnected on source change or element removal. */
+            pageObservers: [] as IntersectionObserver[],
+            /**
+             * Per-page debounce whose callbacks we null out on source change / element removal so a
+             * scroll-through-fast timer doesn't fire a render against a stale pdf document.
+             */
+            pageDebounce: [] as Debounce[],
             pdfDocument: asyncProp({
                 async updateCallback({pdfSource}: {pdfSource: PdfSource}) {
                     try {
-                        const pdfDocument = await pdfjs.getDocument(pdfSource).promise;
+                        const pdfDocument = await pdfjs.getDocument(
+                            toDocumentInitParameters(pdfSource),
+                        ).promise;
                         dispatch(
                             new events.pdfLoad({
                                 pageCount: pdfDocument.numPages,
@@ -190,19 +315,34 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                     }
                 },
             }),
-            canvasElement: undefined as undefined | HTMLCanvasElement,
         };
+    },
+    cleanup({state}) {
+        state.pageObservers.forEach((observer) => observer.disconnect());
+        state.pageDebounce.forEach((debounce) => {
+            debounce.callback = undefined;
+        });
+        void destroyPdfDocument(state.pdfDocument.settledValue);
     },
     render({state, updateState, inputs, dispatch, events}) {
         GlobalWorkerOptions.workerSrc = inputs.pdfJsWorkerPath;
         const pdfSource = inputs.pdfSource;
+        const sourceKey = toPdfSourceKey(pdfSource);
         state.pdfDocument.update({
             pdfSource,
         });
-        if (inputs.pdfSource !== state.lastSource) {
+        if (sourceKey !== state.lastSourceKey) {
+            void destroyPdfDocument(state.pdfDocument.settledValue);
+            state.pageObservers.forEach((observer) => observer.disconnect());
+            state.pageDebounce.forEach((debounce) => {
+                debounce.callback = undefined;
+            });
             updateState({
                 pagePromises: [],
-                lastSource: inputs.pdfSource,
+                renderedPages: new Set<number>(),
+                pageObservers: [],
+                pageDebounce: [],
+                lastSourceKey: sourceKey,
             });
         }
 
@@ -233,8 +373,13 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
         const pdfDocument: PDFDocumentProxy = state.pdfDocument.settledValue;
 
-        return createArray(
-            pdfDocument.numPages,
+        return repeat(
+            createArray(pdfDocument.numPages, (index) => index),
+            (index) =>
+                [
+                    sourceKey,
+                    index,
+                ].join(':'),
             (index) => html`
                 <div
                     class="canvas-wrapper"
@@ -244,51 +389,138 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                     <canvas
                         ${attributes(inputs.attributePassthrough?.canvas)}
                         style=${ifDefined(inputs.stylePassthrough?.canvas)}
-                        ${onDomCreated(async (canvas) => {
-                            const pagePromise = new DeferredPromise();
-                            state.pagePromises[index] = pagePromise;
-                            await state.pagePromises[index - 1]?.promise;
+                        ${onDomCreated((canvas) => {
+                            assert.instanceOf(canvas, HTMLCanvasElement);
 
-                            try {
-                                const pageNumber = index + 1;
+                            const pageNumber = index + 1;
 
-                                assert.instanceOf(canvas, HTMLCanvasElement);
-
-                                const pdfPage = await pdfDocument.getPage(pageNumber);
-                                const viewport = pdfPage.getViewport({
-                                    scale: 1,
-                                });
-
-                                canvas.width = viewport.width;
-                                canvas.height = viewport.height;
-                                const context = canvas.getContext('2d');
-
-                                assert.isDefined(context);
-
-                                const renderTask = pdfPage.render({
-                                    canvasContext: context,
-                                    viewport,
+                            /*
+                             * Let consumers grab the canvas reference as soon as it's in the DOM,
+                             * before any PDF rendering has triggered. This allows consumers to scroll to specific pages.
+                             */
+                            dispatch(
+                                new events.canvasCreate({
                                     canvas,
-                                });
-                                await renderTask.promise;
-                                dispatch(
-                                    new events.canvasLoad({
+                                    pageNumber,
+                                    pageCount: pdfDocument.numPages,
+                                    pdfSource,
+                                    pdfDocument,
+                                }),
+                            );
+
+                            const startRender = async () => {
+                                if (state.renderedPages.has(index)) {
+                                    return;
+                                }
+                                /*
+                                 * Mark + disconnect synchronously so a fast re-fire before the
+                                 * async render body runs can't double-schedule this page.
+                                 */
+                                state.renderedPages.add(index);
+                                observer.disconnect();
+
+                                /*
+                                 * Serialize renders across all pages (regardless of page
+                                 * order) so simultaneous scroll-ins don't spike memory by
+                                 * rendering multiple pdfjs pages in parallel. Each render
+                                 * awaits whatever render was last queued.
+                                 */
+                                const pagePromise = new DeferredPromise();
+                                const previousPage = state.pagePromises.at(-1);
+                                state.pagePromises.push(pagePromise);
+
+                                try {
+                                    await previousPage?.promise;
+
+                                    const pdfPage = await pdfDocument.getPage(pageNumber);
+                                    const maxPixels =
+                                        inputs.maxPixelsPerPage ?? defaultMaxPixelsPerPage;
+                                    const baseViewport = pdfPage.getViewport({
+                                        scale: 1,
+                                    });
+                                    const basePixels = baseViewport.width * baseViewport.height;
+                                    const scale =
+                                        basePixels > maxPixels
+                                            ? Math.sqrt(maxPixels / basePixels)
+                                            : 1;
+                                    const viewport = pdfPage.getViewport({
+                                        scale,
+                                    });
+
+                                    canvas.width = viewport.width;
+                                    canvas.height = viewport.height;
+                                    const context = canvas.getContext('2d');
+
+                                    assert.isDefined(context);
+
+                                    const renderTask = pdfPage.render({
+                                        canvasContext: context,
+                                        viewport,
                                         canvas,
-                                        context,
-                                        pageNumber,
-                                        pageCount: pdfDocument.numPages,
-                                        pdfSource,
-                                        pdfDocument,
-                                    }),
-                                );
-                            } catch (error) {
-                                dispatch(new events.pdfError(ensureError(error)));
-                            } finally {
-                                await wait({
-                                    milliseconds: 300,
-                                });
-                                pagePromise.resolve();
-                            }
+                                    });
+                                    await renderTask.promise;
+                                    dispatch(
+                                        new events.canvasLoad({
+                                            canvas,
+                                            context,
+                                            pageNumber,
+                                            pageCount: pdfDocument.numPages,
+                                            pdfSource,
+                                            pdfDocument,
+                                        }),
+                                    );
+                                    /*
+                                     * Free pdfjs's parsed operator list and cached resources
+                                     * for this page now that the canvas pixels (and any
+                                     * overlay drawing done by `canvasLoad` listeners) are
+                                     * baked in. Rendered pixels on the canvas are unaffected.
+                                     */
+                                    pdfPage.cleanup();
+                                } catch (error) {
+                                    dispatch(new events.pdfError(ensureError(error)));
+                                } finally {
+                                    pagePromise.resolve();
+                                }
+                            };
+
+                            /*
+                             * Debounce scroll-through: the first time the page enters the
+                             * prefetch window, schedule a fire 150ms later. When that fire
+                             * lands, render only if the page is still visible — fast scrolls
+                             * leave `isVisible` false at fire time, so those pages are skipped.
+                             */
+                            let isVisible = false;
+                            const renderDebounce = new Debounce(
+                                DebounceStyle.AfterWait,
+                                {
+                                    milliseconds: 150,
+                                },
+                                () => {
+                                    if (isVisible) {
+                                        void startRender();
+                                    }
+                                },
+                            );
+                            state.pageDebounce.push(renderDebounce);
+
+                            const observer = new IntersectionObserver(
+                                (entries) => {
+                                    isVisible = entries.some((entry) => entry.isIntersecting);
+                                    if (isVisible) {
+                                        renderDebounce.execute();
+                                    }
+                                },
+                                {
+                                    /*
+                                     * Start considering the page 500px before it enters the
+                                     * viewport so that, combined with the dwell debounce, a
+                                     * page the user slows near gets a head start.
+                                     */
+                                    rootMargin: '500px',
+                                },
+                            );
+                            state.pageObservers.push(observer);
+                            observer.observe(canvas);
                         })}
                     ></canvas>
                 </div>

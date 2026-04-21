@@ -59,7 +59,9 @@ export const VirDemo = defineElement()({
                 value: state.selectedPdf,
             })}
                 ${listen(ViraSelect.events.valueChange, (event) => {
-                    updateState({selectedPdf: event.detail});
+                    updateState({
+                        selectedPdf: event.detail,
+                    });
                 })}
             ></${ViraSelect}>
             <${PdfVir.assign({

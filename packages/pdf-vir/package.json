@@ -1,6 +1,6 @@
 {
     "name": "pdf-vir",
-    "version": "0.3.1",
+    "version": "0.4.0",
     "description": "Custom element for rendering PDFs.",
     "keywords": [
         "pdf",
@@ -30,7 +30,7 @@
         "compile": "virmator compile",
         "docs": "virmator docs",
         "start": "virmator frontend",
-        "test": "exit 0",
+        "test": "virmator test web",
         "test:coverage": "npm run test",
         "test:docs": "virmator docs check",
         "test:update": "npm test update"

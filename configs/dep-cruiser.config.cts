@@ -9,6 +9,11 @@ const baseConfig = defineConfig({
                 'src/index\\.ts$',
             ],
         },
+        'not-to-dev-dep': {
+            from: [
+                'vir-demo.element.ts',
+            ],
+        },
     },
     omitRules: [
         // enter rule names here to omit
