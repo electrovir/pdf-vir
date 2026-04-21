@@ -1,9 +1,11 @@
 import {assert} from '@augment-vir/assert';
 import {
     createArray,
+    DeferredPromise,
     ensureError,
     extractErrorMessage,
     type PartialWithUndefined,
+    wait,
 } from '@augment-vir/common';
 import {
     asyncProp,
@@ -167,6 +169,8 @@ export const PdfVir = defineElement<PdfVirInputs>()({
     },
     state({events, dispatch}) {
         return {
+            pagePromises: [] as DeferredPromise[],
+            lastSource: undefined as undefined | PdfSource,
             pdfDocument: asyncProp({
                 async updateCallback({pdfSource}: {pdfSource: PdfSource}) {
                     try {
@@ -189,12 +193,18 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             canvasElement: undefined as undefined | HTMLCanvasElement,
         };
     },
-    render({state, inputs, dispatch, events}) {
+    render({state, updateState, inputs, dispatch, events}) {
         GlobalWorkerOptions.workerSrc = inputs.pdfJsWorkerPath;
         const pdfSource = inputs.pdfSource;
         state.pdfDocument.update({
             pdfSource,
         });
+        if (inputs.pdfSource !== state.lastSource) {
+            updateState({
+                pagePromises: [],
+                lastSource: inputs.pdfSource,
+            });
+        }
 
         if (!state.pdfDocument.settledValue) {
             return html`
@@ -235,6 +245,10 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                         ${attributes(inputs.attributePassthrough?.canvas)}
                         style=${ifDefined(inputs.stylePassthrough?.canvas)}
                         ${onDomCreated(async (canvas) => {
+                            const pagePromise = new DeferredPromise();
+                            state.pagePromises[index] = pagePromise;
+                            await state.pagePromises[index - 1]?.promise;
+
                             try {
                                 const pageNumber = index + 1;
 
@@ -269,6 +283,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                 );
                             } catch (error) {
                                 dispatch(new events.pdfError(ensureError(error)));
+                            } finally {
+                                await wait({
+                                    milliseconds: 300,
+                                });
+                                pagePromise.resolve();
                             }
                         })}
                     ></canvas>
