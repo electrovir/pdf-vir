@@ -1,7 +1,7 @@
 /* eslint-disable @virmator/prefer-parse-url */
 
 import {describe, itCases} from '@augment-vir/test';
-import {arePdfSourcesEqual} from './pdf-vir.element.js';
+import {arePdfSourcesEqual} from './pdf-source.js';
 
 describe(arePdfSourcesEqual.name, () => {
     const sharedBuffer = new Uint8Array([
@@ -143,7 +143,7 @@ describe(arePdfSourcesEqual.name, () => {
             expect: true,
         },
         {
-            it: 'rejects distinct DocumentInitParameters objects with equal fields',
+            it: 'matches distinct DocumentInitParameters objects with equal fields',
             inputs: [
                 {
                     url: '/shared.pdf',
@@ -152,7 +152,67 @@ describe(arePdfSourcesEqual.name, () => {
                     url: '/shared.pdf',
                 },
             ],
+            expect: true,
+        },
+        {
+            it: 'matches distinct DocumentInitParameters objects with equal multi-field payloads',
+            inputs: [
+                {
+                    url: '/shared.pdf',
+                    withCredentials: true,
+                },
+                {
+                    url: '/shared.pdf',
+                    withCredentials: true,
+                },
+            ],
+            expect: true,
+        },
+        {
+            it: 'rejects DocumentInitParameters objects with different fields',
+            inputs: [
+                {
+                    url: '/shared.pdf',
+                    withCredentials: true,
+                },
+                {
+                    url: '/shared.pdf',
+                    withCredentials: false,
+                },
+            ],
             expect: false,
+        },
+        {
+            it: 'rejects DocumentInitParameters with equal fields but different embedded typed arrays',
+            inputs: [
+                {
+                    data: new Uint8Array([
+                        1,
+                        2,
+                        3,
+                    ]),
+                },
+                {
+                    data: new Uint8Array([
+                        1,
+                        2,
+                        3,
+                    ]),
+                },
+            ],
+            expect: false,
+        },
+        {
+            it: 'matches DocumentInitParameters with the same embedded typed array reference',
+            inputs: [
+                {
+                    data: sharedBuffer,
+                },
+                {
+                    data: sharedBuffer,
+                },
+            ],
+            expect: true,
         },
     ]);
 });

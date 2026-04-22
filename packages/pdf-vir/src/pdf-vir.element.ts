@@ -7,7 +7,6 @@ import {
     ensureError,
     extractErrorMessage,
     type PartialWithUndefined,
-    randomString,
 } from '@augment-vir/common';
 import {
     asyncProp,
@@ -26,28 +25,10 @@ import * as pdfjs from 'pdfjs-dist';
 import {GlobalWorkerOptions, type PDFDocumentProxy} from 'pdfjs-dist';
 import {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
 import {LoaderAnimated24Icon, ViraIcon} from 'vira';
+import {type PdfSource, toPdfSourceKey} from './pdf-source.js';
 
 export {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
-
-/**
- * All options for the PDF `pdfSource` property in {@link PdfVirInputs}.
- *
- * @category Internal
- */
-export type PdfSource =
-    | string
-    | URL
-    | Int8Array
-    | Uint8Array
-    | Uint8ClampedArray
-    | Int16Array
-    | Uint16Array
-    | Int32Array
-    | Uint32Array
-    | Float32Array
-    | Float64Array
-    | ArrayBuffer
-    | DocumentInitParameters;
+export {arePdfSourcesEqual, toPdfSourceKey, type PdfSource} from './pdf-source.js';
 
 /**
  * All inputs for {@link PdfVir}.
@@ -142,55 +123,6 @@ async function destroyPdfDocument(settled: undefined | Error | PDFDocumentProxy)
     if (settled && !(settled instanceof Error)) {
         await settled.destroy();
     }
-}
-
-/**
- * Compares two possible pdf sources for equality, covering every variant of {@link PdfSource}:
- *
- * - Strings and `URL`s are compared structurally (including cross-type string↔`URL` via `.href`).
- * - Typed arrays, `ArrayBuffer`s, `DocumentInitParameters`, and any other object types use reference
- *   equality — hold onto the same instance to avoid re-loading.
- */
-export function arePdfSourcesEqual(a: undefined | PdfSource, b: undefined | PdfSource): boolean {
-    if (a == undefined || b == undefined) {
-        return a === b;
-    }
-    return toPdfSourceKey(a) === toPdfSourceKey(b);
-}
-
-/**
- * Module-level registry that assigns a stable string key to each object-typed {@link PdfSource} so
- * subsequent passes over the same reference produce the same key. A `WeakMap` ensures we don't keep
- * sources alive once the caller drops them.
- */
-const pdfSourceRefKeys = new WeakMap<object, string>();
-
-/**
- * Produces a stable string key for a {@link PdfSource}, matching the semantics of
- * {@link arePdfSourcesEqual}:
- *
- * - Strings and `URL`s collapse to the same `url:` key when their href urls match.
- * - Typed arrays, `ArrayBuffer`s, and `DocumentInitParameters` objects get a per-reference `ref:` key
- *   (different references are considered different sources even if their contents match).
- *
- * The returned key is suitable for `===` comparison and for use as a lit `repeat` key prefix.
- *
- * @category Internal
- */
-export function toPdfSourceKey(source: PdfSource): string {
-    if (typeof source === 'string') {
-        return `url:${source}`;
-    } else if (source instanceof URL) {
-        return `url:${source.href}`;
-    }
-
-    const existing = pdfSourceRefKeys.get(source);
-    if (existing) {
-        return existing;
-    }
-    const generated = `ref:${randomString()}`;
-    pdfSourceRefKeys.set(source, generated);
-    return generated;
 }
 
 /**
