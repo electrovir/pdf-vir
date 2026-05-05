@@ -10,3 +10,5 @@
 **/package-lock.json
 **/tsconfig.tsbuildinfo
 /Icon?
+
+packages/pdf-vir/www-static/pdf.worker.mjs
