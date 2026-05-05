@@ -58,14 +58,14 @@ export type PdfVirInputs = {
      * rendered at a lower `scale` so the canvas pixel buffer (width × height × 4 bytes) stays
      * bounded, which prevents out-of-memory crashes on weak devices.
      *
-     * @default 500_000 // ~2MB of canvas memory per page
+     * @default 2_000_000 // ~8MB of canvas memory per page; ~2x scale on a US letter page
      */
     maxPixelsPerPage: number;
     stylePassthrough: PartialWithUndefined<Record<PdfVirElements, CSSResult>>;
     attributePassthrough: PartialWithUndefined<Record<PdfVirElements, AttributeValues>>;
 }>;
 
-const defaultMaxPixelsPerPage = 500_000;
+const defaultMaxPixelsPerPage = 2_000_000;
 
 /** Defaults applied to {@link pdfjs.getDocument} to keep memory bounded on weak devices: */
 const defaultLoadOptions = {
