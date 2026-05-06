@@ -1,21 +1,14 @@
 import {randomString, safeJsonStringify, sortObject} from '@augment-vir/common';
 
 /**
- * Binary representations of PDF data accepted by `PdfSource` and {@link PdfSourceOptions.data}.
+ * Binary representations of PDF data accepted by `PdfSource` and {@link PdfSourceOptions.data}. Only
+ * byte-granularity views are accepted: PDFium reads bytes, so a wider-element typed array (e.g.
+ * `Float32Array`) would silently reinterpret its underlying buffer as PDF bytes — almost always a
+ * bug. Pass a `Uint8Array` view over the same buffer instead.
  *
  * @category Internal
  */
-export type PdfData =
-    | ArrayBuffer
-    | Int8Array
-    | Uint8Array
-    | Uint8ClampedArray
-    | Int16Array
-    | Uint16Array
-    | Int32Array
-    | Uint32Array
-    | Float32Array
-    | Float64Array;
+export type PdfData = ArrayBuffer | Int8Array | Uint8Array | Uint8ClampedArray;
 
 /**
  * Object form of {@link PdfSource} for callers that need to pass a password or fetch options

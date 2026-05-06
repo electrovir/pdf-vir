@@ -15,13 +15,18 @@ const whiteBgra = 0xff_ff_ff_ff;
  * loaded and rendered on demand via the `renderPage` method; call `destroy` once to free the native
  * resources it holds.
  *
- * @category Main
+ * @category Internal
  */
 export class PdfDocument {
     public readonly pageCount: number;
 
     private isDestroyed = false;
 
+    /**
+     * Constructs a `PdfDocument` from already-loaded PDFium handles. Treat as internal: callers
+     * should use {@link loadPdfDocument} instead, which performs the malloc + `FPDF_LoadMemDocument`
+     * dance correctly. Constructing one with arbitrary pointers crashes the WASM module.
+     */
     constructor(
         public readonly pdfium: WrappedPdfiumModule,
         public readonly source: PdfSource,
@@ -142,7 +147,7 @@ export class PdfDocument {
  * Loads `source` into a {@link PdfDocument}. Fetches `pdfiumWasmUrl` (cached per URL) on first call
  * to bring up the PDFium WebAssembly module.
  *
- * @category Main
+ * @category Internal
  */
 export async function loadPdfDocument({
     source,

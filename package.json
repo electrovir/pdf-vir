@@ -1,6 +1,6 @@
 {
     "name": "@pdf-vir/root",
-    "version": "0.4.2",
+    "version": "1.0.0",
     "private": true,
     "homepage": "https://github.com/electrovir/pdf-vir",
     "bugs": {

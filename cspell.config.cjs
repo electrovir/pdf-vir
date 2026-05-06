@@ -4,7 +4,6 @@ module.exports = {
     ...baseConfig,
     ignorePaths: [
         ...baseConfig.ignorePaths,
-        'packages/pdf-vir/www-static/pdf.worker.mjs',
     ],
     words: [
         ...baseConfig.words,

@@ -67,6 +67,7 @@ export const VirDemo = defineElement()({
             <${PdfVir.assign({
                 pdfSource: state.selectedPdf,
                 pdfiumWasmUrl: '/pdfium.wasm',
+                enableZoomControls: true,
                 stylePassthrough: {
                     'canvas-wrapper': css`
                         display: flex;

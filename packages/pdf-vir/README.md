@@ -40,3 +40,17 @@ export const MyApp = defineElement()({
     -   Requires no extra dependencies, included directly in `pdf-vir` files for convenience.
 -   From `@embedpdf/pdfium`: copy from `node_modules/@embedpdf/pdfium/dist/pdfium.wasm`
     -   Requires the [`@embedpdf/pdfium`](https://www.npmjs.com/package/@embedpdf/pdfium) package, which is a peer dependency of this package.
+
+### Zoom controls
+
+Pass `enableZoomControls: true` to render a floating Safari-style zoom toolbar (zoom out, zoom in, reset) over the top of the viewer. The toolbar appears when the cursor moves over the element and auto-hides after a short idle.
+
+```TypeScript
+<${PdfVir.assign({
+    pdfSource: '/my-file.pdf',
+    pdfiumWasmUrl: '/pdfium.wasm',
+    enableZoomControls: true,
+})}></${PdfVir}>
+```
+
+Zoom is applied via CSS scaling, so it does not re-render pages — content above ~2x may appear blurry depending on `maxPixelsPerPage`.

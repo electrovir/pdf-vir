@@ -1,6 +1,6 @@
 {
     "name": "pdf-vir",
-    "version": "0.4.2",
+    "version": "1.0.0",
     "description": "Custom element for rendering PDFs.",
     "keywords": [
         "pdf",
@@ -57,7 +57,8 @@
         "vite": "^8.0.10"
     },
     "peerDependencies": {
-        "@embedpdf/pdfium": "^2",
+        "@embedpdf/pdfium": "^2.14",
+        "@types/emscripten": "^1.41.5",
         "element-vir": ">=26",
         "vira": ">=26"
     },
