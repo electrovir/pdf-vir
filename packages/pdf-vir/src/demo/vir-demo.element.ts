@@ -66,7 +66,7 @@ export const VirDemo = defineElement()({
             ></${ViraSelect}>
             <${PdfVir.assign({
                 pdfSource: state.selectedPdf,
-                pdfJsWorkerPath: '/pdf.worker.mjs',
+                pdfiumWasmUrl: '/pdfium.wasm',
                 stylePassthrough: {
                     'canvas-wrapper': css`
                         display: flex;

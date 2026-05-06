@@ -25,18 +25,18 @@ export const MyApp = defineElement()({
             <${PdfVir.assign({
                 pdfSource: '/my-file.pdf',
 
-                pdfJsWorkerPath: '/pdf.worker.mjs',
+                pdfiumWasmUrl: '/pdfium.wasm',
             })}></${PdfVir}>
         `;
     },
 });
 ```
 
-### Worker file
+### PDFium WebAssembly file
 
-`pdfJsWorkerPath` is a required input to `PdfVir`. This must be a copy of the `pdfjs-dist` worker script placed somewhere in your frontend bundle. This can be obtained in many ways, including the following:
+`pdfiumWasmUrl` is a required input to `PdfVir`. This must be a copy of the PDFium WebAssembly binary placed somewhere in your frontend bundle. This can be obtained in many ways, including the following:
 
--   From `pdf-vir`: copy from `node_modules/pdf-vir/www-static/pdf.worker.mjs`
+-   From `pdf-vir`: copy from `node_modules/pdf-vir/www-static/pdfium.wasm`
     -   Requires no extra dependencies, included directly in `pdf-vir` files for convenience.
--   From `pdfjs-dist`: copy from `node_modules/pdfjs-dist/build/pdf.worker.mjs`
-    -   Requires the [`pdfjs-dist`](https://www.npmjs.com/package/pdfjs-dist) package, which _is_ already included as a dependency of this package.
+-   From `@embedpdf/pdfium`: copy from `node_modules/@embedpdf/pdfium/dist/pdfium.wasm`
+    -   Requires the [`@embedpdf/pdfium`](https://www.npmjs.com/package/@embedpdf/pdfium) package, which is a peer dependency of this package.

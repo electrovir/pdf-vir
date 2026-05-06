@@ -1,14 +1,12 @@
 import {randomString, safeJsonStringify, sortObject} from '@augment-vir/common';
-import {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
 
 /**
- * All options for the PDF `pdfSource` property in `PdfVirInputs`.
+ * Binary representations of PDF data accepted by `PdfSource` and {@link PdfSourceOptions.data}.
  *
  * @category Internal
  */
-export type PdfSource =
-    | string
-    | URL
+export type PdfData =
+    | ArrayBuffer
     | Int8Array
     | Uint8Array
     | Uint8ClampedArray
@@ -17,18 +15,43 @@ export type PdfSource =
     | Int32Array
     | Uint32Array
     | Float32Array
-    | Float64Array
-    | ArrayBuffer
-    | DocumentInitParameters;
+    | Float64Array;
+
+/**
+ * Object form of {@link PdfSource} for callers that need to pass a password or fetch options
+ * alongside the URL or binary data.
+ *
+ * @category Internal
+ */
+export type PdfSourceOptions = {
+    /** PDF data to load directly. Mutually exclusive with `url`. */
+    data?: PdfData;
+    /**
+     * URL to fetch the PDF from. Mutually exclusive with `data`. Standard same-origin / CORS rules
+     * apply.
+     */
+    url?: string | URL;
+    /** Password used to unlock encrypted PDFs. */
+    password?: string;
+    /** Extra options forwarded to `fetch` when loading from a URL. */
+    fetchOptions?: RequestInit;
+};
+
+/**
+ * All options for the PDF `pdfSource` property in `PdfVirInputs`.
+ *
+ * @category Internal
+ */
+export type PdfSource = string | URL | PdfData | PdfSourceOptions;
 
 /**
  * Compares two possible pdf sources for equality, covering every variant of {@link PdfSource}:
  *
  * - Strings and `URL`s are compared structurally (including cross-type string↔`URL` via `.href`).
- * - Plain `DocumentInitParameters` objects are compared structurally via `JSON.stringify`, so a fresh
+ * - Plain {@link PdfSourceOptions} objects are compared structurally via `JSON.stringify`, so a fresh
  *   object literal constructed on every render with the same fields counts as equal.
  * - Typed arrays and `ArrayBuffer`s use reference equality — hold onto the same instance to avoid
- *   re-loading. Any such binary value embedded inside a `DocumentInitParameters` object is also
+ *   re-loading. Any such binary value embedded inside a {@link PdfSourceOptions} object is also
  *   compared by reference while the rest of the object is compared structurally.
  *
  * @category Internal
@@ -62,9 +85,9 @@ function getOrCreateRefKey(value: object): string {
  * {@link arePdfSourcesEqual}:
  *
  * - Strings and `URL`s collapse to the same `url:` key when their href urls match.
- * - Plain `DocumentInitParameters` objects collapse to the same `json:` key when their JSON
+ * - Plain {@link PdfSourceOptions} objects collapse to the same `json:` key when their JSON
  *   representations match (so fresh object literals across renders compare equal).
- * - Typed arrays and `ArrayBuffer`s (standalone or embedded inside a `DocumentInitParameters`) get a
+ * - Typed arrays and `ArrayBuffer`s (standalone or embedded inside a {@link PdfSourceOptions}) get a
  *   per-reference `ref:` key — different references are considered different sources even if their
  *   bytes match.
  *
@@ -84,16 +107,18 @@ export function toPdfSourceKey(source: PdfSource): string {
     try {
         /*
          * The replacer swaps typed arrays / `ArrayBuffer`s out for stable reference keys so
-         * structural comparison stays cheap for plain `DocumentInitParameters` fields while
-         * preserving reference semantics for embedded PDF binary data (meaningful by identity,
-         * not by shape). `safeJsonStringify` mirrors `JSON.stringify` at runtime but its declared
-         * parameters pick only the array-filter overload, so cast to the full signature.
+         * structural comparison stays cheap for plain `PdfSourceOptions` fields while preserving
+         * reference semantics for embedded PDF binary data (meaningful by identity, not by shape).
+         * `safeJsonStringify` mirrors `JSON.stringify` at runtime but its declared parameters pick
+         * only the array-filter overload, so cast to the full signature.
          */
         return `json:${(safeJsonStringify as typeof JSON.stringify)(
             sortObject(source),
             (_key: string, value: unknown) => {
                 if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
                     return getOrCreateRefKey(value);
+                } else if (value instanceof URL) {
+                    return value.href;
                 }
                 return value;
             },

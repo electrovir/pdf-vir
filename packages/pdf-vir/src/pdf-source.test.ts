@@ -135,7 +135,7 @@ describe(arePdfSourcesEqual.name, () => {
             expect: false,
         },
         {
-            it: 'matches the same DocumentInitParameters reference',
+            it: 'matches the same PdfSourceOptions reference',
             inputs: [
                 sharedInitParams,
                 sharedInitParams,
@@ -143,7 +143,7 @@ describe(arePdfSourcesEqual.name, () => {
             expect: true,
         },
         {
-            it: 'matches distinct DocumentInitParameters objects with equal fields',
+            it: 'matches distinct PdfSourceOptions objects with equal fields',
             inputs: [
                 {
                     url: '/shared.pdf',
@@ -155,35 +155,35 @@ describe(arePdfSourcesEqual.name, () => {
             expect: true,
         },
         {
-            it: 'matches distinct DocumentInitParameters objects with equal multi-field payloads',
+            it: 'matches distinct PdfSourceOptions objects with equal multi-field payloads',
             inputs: [
                 {
                     url: '/shared.pdf',
-                    withCredentials: true,
+                    password: 'hunter2',
                 },
                 {
                     url: '/shared.pdf',
-                    withCredentials: true,
+                    password: 'hunter2',
                 },
             ],
             expect: true,
         },
         {
-            it: 'rejects DocumentInitParameters objects with different fields',
+            it: 'rejects PdfSourceOptions objects with different fields',
             inputs: [
                 {
                     url: '/shared.pdf',
-                    withCredentials: true,
+                    password: 'hunter2',
                 },
                 {
                     url: '/shared.pdf',
-                    withCredentials: false,
+                    password: 'different',
                 },
             ],
             expect: false,
         },
         {
-            it: 'rejects DocumentInitParameters with equal fields but different embedded typed arrays',
+            it: 'rejects PdfSourceOptions with equal fields but different embedded typed arrays',
             inputs: [
                 {
                     data: new Uint8Array([
@@ -203,7 +203,7 @@ describe(arePdfSourcesEqual.name, () => {
             expect: false,
         },
         {
-            it: 'matches DocumentInitParameters with the same embedded typed array reference',
+            it: 'matches PdfSourceOptions with the same embedded typed array reference',
             inputs: [
                 {
                     data: sharedBuffer,

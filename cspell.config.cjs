@@ -8,5 +8,8 @@ module.exports = {
     ],
     words: [
         ...baseConfig.words,
+        'pdfium',
+        'embedpdf',
+        'emscripten',
     ],
 };

@@ -21,14 +21,18 @@ import {
     onDomCreated,
     repeat,
 } from 'element-vir';
-import * as pdfjs from 'pdfjs-dist';
-import {GlobalWorkerOptions, type PDFDocumentProxy} from 'pdfjs-dist';
-import {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
 import {LoaderAnimated24Icon, ViraIcon} from 'vira';
+import {loadPdfDocument, type PdfDocument} from './pdf-document.js';
 import {type PdfSource, toPdfSourceKey} from './pdf-source.js';
 
-export {type DocumentInitParameters} from 'pdfjs-dist/types/src/display/api.js';
-export {arePdfSourcesEqual, toPdfSourceKey, type PdfSource} from './pdf-source.js';
+export {loadPdfDocument, PdfDocument} from './pdf-document.js';
+export {
+    arePdfSourcesEqual,
+    toPdfSourceKey,
+    type PdfData,
+    type PdfSource,
+    type PdfSourceOptions,
+} from './pdf-source.js';
 
 /**
  * All inputs for {@link PdfVir}.
@@ -37,21 +41,18 @@ export {arePdfSourcesEqual, toPdfSourceKey, type PdfSource} from './pdf-source.j
  */
 export type PdfVirInputs = {
     /**
-     * This is the main entry point for loading a PDF.
-     *
-     * If a URL is used to fetch the PDF data a standard Fetch API call (or XHR as fallback) is
-     * used, which means it must follow same origin rules, e.g. no cross-domain requests without
-     * CORS.
-     *
-     * @see `getDocument` at https://mozilla.github.io/pdf.js/api/
+     * This is the main entry point for loading a PDF. May be a URL string, a `URL`, raw PDF bytes
+     * (`ArrayBuffer` / typed array), or a `PdfSourceOptions` object that includes a password or
+     * fetch options. URL fetches use the standard Fetch API, so cross-origin requests must follow
+     * the usual same-origin / CORS rules.
      */
     pdfSource: PdfSource;
     /**
-     * Used to set `GlobalWorkerOptions.workerSrc` on the PDFJs library. This is required or the
-     * library simply crashes. This should be a string containing the path and filename of the
-     * worker file. (Copy `node_modules/pdfjs-dist/build/pdf.worker.mjs` to your public directory.)
+     * URL of the PDFium WebAssembly binary. Required: PDFium cannot run without it. Copy
+     * `node_modules/@embedpdf/pdfium/dist/pdfium.wasm` into your public assets and pass the URL it
+     * is served from here.
      */
-    pdfJsWorkerPath: string;
+    pdfiumWasmUrl: string | URL;
 } & PartialWithUndefined<{
     /**
      * Caps the pixel count of each rendered page. Pages whose natural size exceeds this cap are
@@ -66,33 +67,6 @@ export type PdfVirInputs = {
 }>;
 
 const defaultMaxPixelsPerPage = 2_000_000;
-
-/** Defaults applied to {@link pdfjs.getDocument} to keep memory bounded on weak devices: */
-const defaultLoadOptions = {
-    /**
-     * `disableAutoFetch`: pdfjs otherwise prefetches the entire file after the first byte range,
-     * which spikes memory. With this off, pdfjs fetches only the byte ranges it actually needs.
-     */
-    disableAutoFetch: true,
-} as const satisfies DocumentInitParameters;
-
-function toDocumentInitParameters(source: PdfSource): DocumentInitParameters {
-    if (typeof source === 'string' || source instanceof URL) {
-        return {
-            ...defaultLoadOptions,
-            url: source,
-        };
-    } else if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
-        return {
-            ...defaultLoadOptions,
-            data: source,
-        };
-    }
-    return {
-        ...defaultLoadOptions,
-        ...source,
-    };
-}
 
 /**
  * All internal elements of {@link PdfVir} that you can pass styles or attributes to.
@@ -110,18 +84,17 @@ export type PdfVirElements = 'canvas' | 'canvas-wrapper' | 'loader' | 'error';
 export type PdfLoadEventDetail = {
     /** The total pages in the document. */
     pageCount: number;
-    pdfDocument: PDFDocumentProxy;
+    pdfDocument: PdfDocument;
     pdfSource: PdfSource;
 };
 
 /**
  * Destroys a settled pdf document (if it is one — skips `undefined` and `Error` settled values),
- * freeing pdfjs's parsed pages, fonts, and worker-side buffers. Runs in the background; surfaces
- * any failure through `onError` so callers can dispatch a `pdfError` event.
+ * freeing the PDFium native handles and the underlying data buffer.
  */
-async function destroyPdfDocument(settled: undefined | Error | PDFDocumentProxy) {
+function destroyPdfDocument(settled: undefined | Error | PdfDocument) {
     if (settled && !(settled instanceof Error)) {
-        await settled.destroy();
+        settled.destroy();
     }
 }
 
@@ -227,14 +200,21 @@ export const PdfVir = defineElement<PdfVirInputs>()({
              */
             pageDebounce: [] as Debounce[],
             pdfDocument: asyncProp({
-                async updateCallback({pdfSource}: {pdfSource: PdfSource}) {
+                async updateCallback({
+                    pdfSource,
+                    pdfiumWasmUrl,
+                }: {
+                    pdfSource: PdfSource;
+                    pdfiumWasmUrl: string | URL;
+                }) {
                     try {
-                        const pdfDocument = await pdfjs.getDocument(
-                            toDocumentInitParameters(pdfSource),
-                        ).promise;
+                        const pdfDocument = await loadPdfDocument({
+                            source: pdfSource,
+                            pdfiumWasmUrl,
+                        });
                         dispatch(
                             new events.pdfLoad({
-                                pageCount: pdfDocument.numPages,
+                                pageCount: pdfDocument.pageCount,
                                 pdfDocument,
                                 pdfSource,
                             }),
@@ -254,17 +234,17 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         state.pageDebounce.forEach((debounce) => {
             debounce.callback = undefined;
         });
-        void destroyPdfDocument(state.pdfDocument.settledValue);
+        destroyPdfDocument(state.pdfDocument.settledValue);
     },
     render({state, updateState, inputs, dispatch, events}) {
-        GlobalWorkerOptions.workerSrc = inputs.pdfJsWorkerPath;
         const pdfSource = inputs.pdfSource;
         const sourceKey = toPdfSourceKey(pdfSource);
         state.pdfDocument.update({
             pdfSource,
+            pdfiumWasmUrl: inputs.pdfiumWasmUrl,
         });
         if (sourceKey !== state.lastSourceKey) {
-            void destroyPdfDocument(state.pdfDocument.settledValue);
+            destroyPdfDocument(state.pdfDocument.settledValue);
             state.pageObservers.forEach((observer) => observer.disconnect());
             state.pageDebounce.forEach((debounce) => {
                 debounce.callback = undefined;
@@ -303,10 +283,10 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             `;
         }
 
-        const pdfDocument: PDFDocumentProxy = state.pdfDocument.settledValue;
+        const pdfDocument: PdfDocument = state.pdfDocument.settledValue;
 
         return repeat(
-            createArray(pdfDocument.numPages, (index) => index),
+            createArray(pdfDocument.pageCount, (index) => index),
             (index) =>
                 [
                     sourceKey,
@@ -328,13 +308,14 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
                             /*
                              * Let consumers grab the canvas reference as soon as it's in the DOM,
-                             * before any PDF rendering has triggered. This allows consumers to scroll to specific pages.
+                             * before any PDF rendering has triggered. This allows consumers to
+                             * scroll to specific pages.
                              */
                             dispatch(
                                 new events.canvasCreate({
                                     canvas,
                                     pageNumber,
-                                    pageCount: pdfDocument.numPages,
+                                    pageCount: pdfDocument.pageCount,
                                     pdfSource,
                                     pdfDocument,
                                 }),
@@ -354,8 +335,9 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                 /*
                                  * Serialize renders across all pages (regardless of page
                                  * order) so simultaneous scroll-ins don't spike memory by
-                                 * rendering multiple pdfjs pages in parallel. Each render
-                                 * awaits whatever render was last queued.
+                                 * rendering multiple pages in parallel — and so the shared
+                                 * PDFium WASM heap is only touched by one render at a time.
+                                 * Each render awaits whatever render was last queued.
                                  */
                                 const pagePromise = new DeferredPromise();
                                 const previousPage = state.pagePromises.at(-1);
@@ -364,50 +346,28 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                 try {
                                     await previousPage?.promise;
 
-                                    const pdfPage = await pdfDocument.getPage(pageNumber);
                                     const maxPixels =
                                         inputs.maxPixelsPerPage ?? defaultMaxPixelsPerPage;
-                                    const baseViewport = pdfPage.getViewport({
-                                        scale: 1,
-                                    });
-                                    const basePixels = baseViewport.width * baseViewport.height;
-                                    const scale =
-                                        basePixels > maxPixels
-                                            ? Math.sqrt(maxPixels / basePixels)
-                                            : 1;
-                                    const viewport = pdfPage.getViewport({
-                                        scale,
-                                    });
-
-                                    canvas.width = viewport.width;
-                                    canvas.height = viewport.height;
-                                    const context = canvas.getContext('2d');
-
-                                    assert.isDefined(context);
-
-                                    const renderTask = pdfPage.render({
-                                        canvasContext: context,
-                                        viewport,
+                                    const result = pdfDocument.renderPage({
+                                        pageNumber,
                                         canvas,
+                                        computeScale({widthPoints, heightPoints}) {
+                                            const basePixels = widthPoints * heightPoints;
+                                            return basePixels > maxPixels
+                                                ? Math.sqrt(maxPixels / basePixels)
+                                                : 1;
+                                        },
                                     });
-                                    await renderTask.promise;
                                     dispatch(
                                         new events.canvasLoad({
                                             canvas,
-                                            context,
+                                            context: result.context,
                                             pageNumber,
-                                            pageCount: pdfDocument.numPages,
+                                            pageCount: pdfDocument.pageCount,
                                             pdfSource,
                                             pdfDocument,
                                         }),
                                     );
-                                    /*
-                                     * Free pdfjs's parsed operator list and cached resources
-                                     * for this page now that the canvas pixels (and any
-                                     * overlay drawing done by `canvasLoad` listeners) are
-                                     * baked in. Rendered pixels on the canvas are unaffected.
-                                     */
-                                    pdfPage.cleanup();
                                 } catch (error) {
                                     dispatch(new events.pdfError(ensureError(error)));
                                 } finally {

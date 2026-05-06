@@ -8,7 +8,7 @@ export const MyApp = defineElement()({
             <${PdfVir.assign({
                 pdfSource: '/my-file.pdf',
 
-                pdfJsWorkerPath: '/pdf.worker.mjs',
+                pdfiumWasmUrl: '/pdfium.wasm',
             })}></${PdfVir}>
         `;
     },
