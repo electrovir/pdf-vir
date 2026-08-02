@@ -20,7 +20,7 @@ const whiteBgra = 0xff_ff_ff_ff;
 export class PdfDocument {
     public readonly pageCount: number;
 
-    private isDestroyed = false;
+    protected isDestroyed = false;
 
     /**
      * Constructs a `PdfDocument` from already-loaded PDFium handles. Treat as internal: callers
@@ -30,8 +30,8 @@ export class PdfDocument {
     constructor(
         public readonly pdfium: WrappedPdfiumModule,
         public readonly source: PdfSource,
-        private readonly documentPtr: number,
-        private readonly dataPtr: number,
+        protected readonly documentPtr: number,
+        protected readonly dataPtr: number,
     ) {
         this.pageCount = pdfium.FPDF_GetPageCount(documentPtr);
     }
@@ -201,8 +201,9 @@ async function resolveSource(
             bytes: await fetchPdfBytes(options.url, options.fetchOptions),
             password: options.password,
         };
+    } else {
+        throw new Error('PdfSource requires either a `url` or `data` property.');
     }
-    throw new Error('PdfSource requires either a `url` or `data` property.');
 }
 
 async function fetchPdfBytes(

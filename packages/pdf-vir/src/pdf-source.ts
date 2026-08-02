@@ -49,6 +49,7 @@ export type PdfSource = string | URL | PdfData | PdfSourceOptions;
  *
  * @category Internal
  */
+// eslint-disable-next-line @virmator/prefer-params-object
 export function arePdfSourcesEqual(a: undefined | PdfSource, b: undefined | PdfSource): boolean {
     if (a == undefined || b == undefined) {
         return a === b;
@@ -112,8 +113,9 @@ export function toPdfSourceKey(source: PdfSource): string {
                     return getOrCreateRefKey(value);
                 } else if (value instanceof URL) {
                     return value.href;
+                } else {
+                    return value;
                 }
-                return value;
             },
         )}`;
     } catch {
