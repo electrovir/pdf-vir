@@ -53,4 +53,4 @@ Pass `enableZoomControls: true` to render a floating Safari-style zoom toolbar (
 })}></${PdfVir}>
 ```
 
-Zoom is applied via CSS scaling, so it does not re-render pages — content above ~2x may appear blurry depending on `maxPixelsPerPage`.
+Zoom immediately scales the already-rendered canvases with CSS, then re-renders the pages on screen at the new zoom level once zooming settles, so they end up sharp instead of stretched. Off-screen pages re-render when they scroll back into view.

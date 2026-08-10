@@ -45,6 +45,9 @@ export class PdfDocument {
      * `computeScale` runs after the page loads with the page's intrinsic point dimensions so
      * callers can clamp the render scale (e.g. to keep the canvas pixel buffer below a memory cap)
      * without paying for a second page load.
+     *
+     * The returned context is left scaled to PDF points, so drawing on top of the rendered page
+     * uses the same coordinates the PDF itself does regardless of the render scale.
      */
     public renderPage({
         pageNumber,
@@ -117,6 +120,13 @@ export class PdfDocument {
             } finally {
                 pdfium.FPDFBitmap_Destroy(bitmapPtr);
             }
+
+            /*
+             * Leave the context in PDF-point space (1/72 inch per unit) so callers can draw
+             * overlays using the PDF's own coordinates instead of tracking the render scale.
+             * Applied after `putImageData`, which ignores the transform anyway.
+             */
+            context.setTransform(scale, 0, 0, scale, 0, 0);
 
             return {
                 context,
@@ -273,11 +283,16 @@ function writeBitmapToContext({
      * Swap B and R channels in-place. PDFium produces little-endian BGRA (memory order B, G, R,
      * A) but canvas `ImageData` expects RGBA. Operating on a `Uint32Array` view lets us flip
      * each pixel in a single masked read/write rather than four byte-level loads per pixel.
+     *
+     * An indexed loop rather than `forEach`: this runs once per pixel, up to `maxPixelsPerPage`
+     * times per render, and skipping the per-element callback measurably shortens the main-thread
+     * block on low-power devices.
      */
     const dst32 = new Uint32Array(dst.buffer, dst.byteOffset, dst.byteLength / 4);
-    dst32.forEach((value, index) => {
+    for (let index = 0; index < dst32.length; index++) {
+        const value = dst32[index] as number;
         dst32[index] = (value & 0xff_00_ff_00) | ((value & 0xff) << 16) | ((value >>> 16) & 0xff);
-    });
+    }
 
     context.putImageData(imageData, 0, 0);
 }

@@ -1,4 +1,4 @@
-import {assert} from '@augment-vir/assert';
+import {assert, check} from '@augment-vir/assert';
 import {
     createArray,
     Debounce,
@@ -8,6 +8,7 @@ import {
     extractErrorMessage,
     type PartialWithUndefined,
 } from '@augment-vir/common';
+import {type AnyDuration} from 'date-vir';
 import {
     asyncProp,
     attributes,
@@ -25,6 +26,11 @@ import {
 import {LoaderAnimated24Icon, lucideIcons, ViraIcon, viraTheme} from 'vira';
 import {loadPdfDocument, type PdfDocument} from './pdf-document.js';
 import {type PdfSource, toPdfSourceKey} from './pdf-source.js';
+import {
+    computeDeviceMaxPixelsPerPage,
+    computeMaxRenderScale,
+    computeRenderScale,
+} from './render-scale.js';
 import {clampZoomScale, computeAnchoredScrollPosition, isPointInPaddedRect} from './zoom-util.js';
 
 export {loadPdfDocument, PdfDocument} from './pdf-document.js';
@@ -57,17 +63,26 @@ export type PdfVirInputs = {
     pdfiumWasmUrl: string | URL;
 } & PartialWithUndefined<{
     /**
-     * Caps the pixel count of each rendered page. Pages whose natural size exceeds this cap are
+     * Caps the pixel count of each rendered page. Pages whose target size exceeds this cap are
      * rendered at a lower `scale` so the canvas pixel buffer (width × height × 4 bytes) stays
      * bounded, which prevents out-of-memory crashes on weak devices.
      *
-     * @default 2_000_000 // ~8MB of canvas memory per page; ~2x scale on a US letter page
+     * Defaults to a budget derived from what the browser reports about the device: between
+     * 2_000_000 pixels (~8MB per page) and 8_000_000 (~32MB per page).
      */
     maxPixelsPerPage: number;
     /**
+     * Multiplies the render resolution beyond what each page's on-screen size requires. Values
+     * above 1 keep pages sharp in the window between a zoom and its re-render, at the cost of that
+     * multiplier squared in canvas memory.
+     *
+     * @default 1
+     */
+    renderScaleMultiplier: number;
+    /**
      * When `true`, renders a floating zoom toolbar (zoom out, zoom in, reset) at the top of the
-     * scrollable viewer. Zoom scales the rendered canvases via CSS, so it does not re-render the
-     * underlying PDF — pages may appear blurry beyond ~2x depending on `maxPixelsPerPage`.
+     * scrollable viewer. Zooming scales already-rendered canvases via CSS and then re-renders the
+     * pages on screen at the new zoom level, up to the resolution `maxPixelsPerPage` allows.
      *
      * @default false
      */
@@ -76,13 +91,41 @@ export type PdfVirInputs = {
     attributePassthrough: PartialWithUndefined<Record<PdfVirElements, AttributeValues>>;
 }>;
 
-const defaultMaxPixelsPerPage = 2_000_000;
+/**
+ * Read once at module load: neither value changes for the life of the page, and both are missing on
+ * some browsers.
+ */
+const defaultMaxPixelsPerPage = computeDeviceMaxPixelsPerPage({
+    deviceMemoryGb: readNavigatorNumber('deviceMemory'),
+    cpuCoreCount: readNavigatorNumber('hardwareConcurrency'),
+});
+const defaultRenderScaleMultiplier = 1;
+/**
+ * How far outside the viewport a page keeps its rendered pixels. Beyond this, the canvas buffer is
+ * released and the page re-renders if the user scrolls back. Must stay comfortably wider than
+ * {@link pageRenderMargin} so a page isn't freed and re-rendered repeatedly by small scrolls.
+ */
+const pageEvictionMargin = '2000px';
+/**
+ * How far ahead of the viewport a page starts rendering, giving it a head start before the user
+ * reaches it.
+ */
+const pageRenderMargin = '500px';
+/**
+ * How long zooming must settle before visible pages re-render. Long enough that clicking zoom in
+ * several times in a row only triggers one round of renders.
+ */
+const zoomRerenderDelay: AnyDuration = {
+    milliseconds: 300,
+};
 const zoomMin = 0.5;
 const zoomMax = 4;
 const zoomStepFactor = 1.25;
 const defaultZoomScale = 1;
 const epsilon = 0.001;
-const zoomToolbarHideDelayMs = 2000;
+const zoomToolbarHideDelay: AnyDuration = {
+    seconds: 2,
+};
 const zoomToolbarHoverPaddingPx = 32;
 
 /**
@@ -109,6 +152,29 @@ export type PdfLoadEventDetail = {
     pageCount: number;
     pdfDocument: PdfDocument;
     pdfSource: PdfSource;
+};
+
+/**
+ * Reads a numeric `navigator` property that not every browser implements, such as the Chromium-only
+ * `deviceMemory`.
+ */
+function readNavigatorNumber(key: string): number | undefined {
+    const value = check.hasKey(globalThis.navigator, key) ? globalThis.navigator[key] : undefined;
+
+    return check.isNumber(value) ? value : undefined;
+}
+
+/**
+ * Handle onto a single page canvas, kept so the element can re-render the pages currently on screen
+ * when the zoom level changes.
+ *
+ * @category Internal
+ */
+export type PageRenderer = {
+    /** Renders the page, unless it already rendered at the current zoom level or higher. */
+    render: () => Promise<void>;
+    /** Whether the page is currently within the viewport's prefetch window. */
+    isVisible: () => boolean;
 };
 
 /**
@@ -298,6 +364,10 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         canvasLoad: defineElementEvent<
             {
                 canvas: HTMLCanvasElement;
+                /**
+                 * Already scaled to PDF points (1/72 inch per unit), so overlays drawn on it line
+                 * up with the page without needing to account for zoom scale.
+                 */
                 context: CanvasRenderingContext2D;
                 pageNumber: number;
             } & PdfLoadEventDetail
@@ -328,9 +398,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
              * inputs.
              */
             isToolbarActive: false,
-            toolbarHideDebounce: new Debounce(DebounceStyle.AfterWait, {
-                milliseconds: zoomToolbarHideDelayMs,
-            }),
+            toolbarHideDebounce: new Debounce(DebounceStyle.AfterWait, zoomToolbarHideDelay),
             /**
              * Holder for the AbortController that's `abort()`ed in `cleanup` to remove the host
              * mouse listeners. Wrapped in an object so the `current` field can be mutated without
@@ -349,8 +417,12 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 current: undefined as undefined | DeferredPromise,
             },
             lastSourceKey: undefined as undefined | string,
-            /** Page indices whose render has been kicked off (or completed). */
-            renderedPages: new Set<number>(),
+            /**
+             * One entry per page canvas currently in the DOM, used to re-render the pages the user
+             * is looking at after a zoom change.
+             */
+            pageRenderers: [] as PageRenderer[],
+            zoomRerenderDebounce: new Debounce(DebounceStyle.AfterWait, zoomRerenderDelay),
             /** Observers that must be disconnected on source change or element removal. */
             pageObservers: [] as IntersectionObserver[],
             /**
@@ -418,7 +490,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
              * Skip the auto-hide while the pointer is hovering the toolbar's expanded zone so a
              * user lining up to click a button doesn't watch it disappear out from under them.
              * The debounce keeps re-arming via mousemove; once the pointer leaves the zone, the
-             * normal countdown (zoomToolbarHideDelayMs) resumes.
+             * normal countdown (zoomToolbarHideDelay) resumes.
              */
             if (pointerNearRef.value) {
                 return;
@@ -428,6 +500,18 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                     isToolbarVisible: false,
                 });
             }
+        };
+
+        state.zoomRerenderDebounce.callback = () => {
+            /*
+             * Re-render only what the user is looking at. Off-screen pages pick up the new zoom
+             * from their intersection observer when they scroll back in.
+             */
+            state.pageRenderers.forEach((renderer) => {
+                if (renderer.isVisible()) {
+                    void renderer.render();
+                }
+            });
         };
 
         const abortController = new AbortController();
@@ -481,6 +565,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             debounce.callback = undefined;
         });
         state.toolbarHideDebounce.callback = undefined;
+        state.zoomRerenderDebounce.callback = undefined;
         state.toolbarListeners.current?.abort();
         destroyPdfDocument(state.pdfDocument.settledValue);
     },
@@ -499,7 +584,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             });
             state.lastPagePromise.current = undefined;
             updateState({
-                renderedPages: new Set<number>(),
+                pageRenderers: [],
                 pageObservers: [],
                 pageDebounce: [],
                 lastSourceKey: sourceKey,
@@ -560,6 +645,12 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             updateState({
                 zoomScale: newScale,
             });
+            /*
+             * Zoom scales already-rendered canvases with CSS, which softens them past the
+             * resolution they were rendered at. Re-render the pages on screen once the zooming
+             * settles so they sharpen back up.
+             */
+            state.zoomRerenderDebounce.execute();
 
             requestAnimationFrame(() => {
                 const {scrollLeft, scrollTop} = computeAnchoredScrollPosition({
@@ -704,16 +795,38 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                         }),
                                     );
 
+                                    /**
+                                     * Zoom level this canvas was last rendered at, or `undefined`
+                                     * until its first render.
+                                     */
+                                    let renderedZoom: undefined | number = undefined;
+                                    /**
+                                     * Set once a render hits the `maxPixelsPerPage` ceiling, where
+                                     * zooming further can't buy any more detail.
+                                     */
+                                    let isAtMaxResolution = false;
+                                    let isRendering = false;
+
                                     const startRender = async () => {
-                                        if (state.renderedPages.has(index)) {
+                                        /*
+                                         * Bail when a render is already in flight, or when this
+                                         * page already rendered at the current zoom or higher: a
+                                         * canvas with more pixels than it needs still looks right
+                                         * scaled down, so only zooming in warrants a re-render.
+                                         */
+                                        if (
+                                            isRendering ||
+                                            (renderedZoom != undefined &&
+                                                (isAtMaxResolution ||
+                                                    state.zoomScale <= renderedZoom + epsilon))
+                                        ) {
                                             return;
                                         }
                                         /*
-                                         * Mark + disconnect synchronously so a fast re-fire before the
-                                         * async render body runs can't double-schedule this page.
+                                         * Flagged synchronously so a fast re-fire before the async
+                                         * render body runs can't double-schedule this page.
                                          */
-                                        state.renderedPages.add(index);
-                                        observer.disconnect();
+                                        isRendering = true;
 
                                         /*
                                          * Serialize renders across all pages (regardless of page
@@ -731,16 +844,47 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
                                             const maxPixels =
                                                 inputs.maxPixelsPerPage ?? defaultMaxPixelsPerPage;
+                                            const zoomAtRender = state.zoomScale;
                                             const result = pdfDocument.renderPage({
                                                 pageNumber,
                                                 canvas,
                                                 computeScale({widthPoints, heightPoints}) {
-                                                    const basePixels = widthPoints * heightPoints;
-                                                    return basePixels > maxPixels
-                                                        ? Math.sqrt(maxPixels / basePixels)
-                                                        : 1;
+                                                    return computeRenderScale({
+                                                        widthPoints,
+                                                        heightPoints,
+                                                        /*
+                                                         * The bounding rect already includes the
+                                                         * CSS zoom factor, so a page rendered while
+                                                         * zoomed in gets the extra resolution.
+                                                         */
+                                                        devicePixelWidth:
+                                                            canvas.getBoundingClientRect().width *
+                                                            (globalThis.devicePixelRatio || 1),
+                                                        scaleMultiplier:
+                                                            inputs.renderScaleMultiplier ??
+                                                            defaultRenderScaleMultiplier,
+                                                        maxPixels,
+                                                    });
                                                 },
                                             });
+                                            /*
+                                             * Pin the aspect ratio so the page holds its place in
+                                             * the scroll layout after eviction drops the canvas to
+                                             * zero pixels.
+                                             */
+                                            canvas.style.aspectRatio = [
+                                                result.widthPoints,
+                                                result.heightPoints,
+                                            ].join(' / ');
+                                            renderedZoom = zoomAtRender;
+                                            isAtMaxResolution =
+                                                result.scale >=
+                                                computeMaxRenderScale({
+                                                    widthPoints: result.widthPoints,
+                                                    heightPoints: result.heightPoints,
+                                                    maxPixels,
+                                                }) -
+                                                    epsilon;
                                             dispatch(
                                                 new events.canvasLoad({
                                                     canvas,
@@ -754,8 +898,26 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                         } catch (error) {
                                             dispatch(new events.pdfError(ensureError(error)));
                                         } finally {
+                                            isRendering = false;
                                             pagePromise.resolve();
                                         }
+                                    };
+
+                                    /**
+                                     * Releases this page's canvas pixels. Without this, every page
+                                     * the user scrolls past keeps its bitmap for the life of the
+                                     * element, and a long document at high zoom exhausts the
+                                     * browser's canvas memory — which mobile Safari answers by
+                                     * blanking canvases rather than by failing loudly.
+                                     */
+                                    const evictCanvas = () => {
+                                        if (isRendering || renderedZoom == undefined) {
+                                            return;
+                                        }
+                                        canvas.width = 0;
+                                        canvas.height = 0;
+                                        renderedZoom = undefined;
+                                        isAtMaxResolution = false;
                                     };
 
                                     /*
@@ -789,15 +951,39 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                         },
                                         {
                                             /*
-                                             * Start considering the page 500px before it enters the
-                                             * viewport so that, combined with the dwell debounce, a
-                                             * page the user slows near gets a head start.
+                                             * Combined with the dwell debounce, this gives a page
+                                             * the user slows near a head start before it scrolls
+                                             * into view.
                                              */
-                                            rootMargin: '500px',
+                                            rootMargin: pageRenderMargin,
                                         },
                                     );
+                                    /*
+                                     * Observation continues after the page renders (rather than
+                                     * disconnecting) so `isVisible` stays accurate for zoom
+                                     * re-renders. `startRender` itself skips pages that are
+                                     * already rendered at a high enough resolution.
+                                     */
                                     state.pageObservers.push(observer);
                                     observer.observe(canvas);
+
+                                    const evictionObserver = new IntersectionObserver(
+                                        (entries) => {
+                                            if (!entries.some((entry) => entry.isIntersecting)) {
+                                                evictCanvas();
+                                            }
+                                        },
+                                        {
+                                            rootMargin: pageEvictionMargin,
+                                        },
+                                    );
+                                    state.pageObservers.push(evictionObserver);
+                                    evictionObserver.observe(canvas);
+
+                                    state.pageRenderers.push({
+                                        render: startRender,
+                                        isVisible: () => isVisible,
+                                    });
                                 })}
                             ></canvas>
                         </div>
