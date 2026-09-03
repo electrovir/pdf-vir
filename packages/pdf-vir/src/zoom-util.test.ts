@@ -1,55 +1,5 @@
 import {describe, itCases} from '@augment-vir/test';
-import {clampZoomScale, computeAnchoredScrollPosition, isPointInPaddedRect} from './zoom-util.js';
-
-describe(clampZoomScale.name, () => {
-    const range = {
-        min: 0.5,
-        max: 4,
-    };
-
-    itCases(clampZoomScale, [
-        {
-            it: 'returns the target unchanged when inside the range',
-            inputs: [
-                2,
-                range,
-            ],
-            expect: 2,
-        },
-        {
-            it: 'returns the target at the lower bound',
-            inputs: [
-                range.min,
-                range,
-            ],
-            expect: range.min,
-        },
-        {
-            it: 'returns the target at the upper bound',
-            inputs: [
-                range.max,
-                range,
-            ],
-            expect: range.max,
-        },
-        {
-            it: 'clamps a value below the lower bound',
-            inputs: [
-                0.1,
-                range,
-            ],
-            expect: range.min,
-        },
-        {
-            it: 'clamps a value above the upper bound',
-            inputs: [
-                10,
-                range,
-            ],
-            expect: range.max,
-        },
-    ]);
-});
+import {computeAnchoredScrollPosition, isPointInPaddedRect} from './zoom-util.js';
 
 describe(computeAnchoredScrollPosition.name, () => {
     itCases(computeAnchoredScrollPosition, [

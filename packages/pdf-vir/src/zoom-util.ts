@@ -1,15 +1,4 @@
 /**
- * Clamps `target` to the inclusive `[min, max]` range. Returns the clamped value rounded to the
- * nearest representable scale; callers compare against the previous scale with an epsilon to decide
- * whether to apply the change.
- *
- * @category Internal
- */
-export function clampZoomScale(target: number, {min, max}: {min: number; max: number}): number {
-    return Math.min(max, Math.max(min, target));
-}
-
-/**
  * Computes the scroll-container scroll positions that keep the same content point at the visual
  * center of the viewport across a zoom (or any layout change that scales the scroll dimensions).
  * Captures the visible-center as a ratio of the old scroll dimensions, then applies that ratio to
