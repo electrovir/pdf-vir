@@ -39,9 +39,16 @@ import {
     computeMaxRenderScale,
     computeRenderScale,
 } from './render-scale.js';
-import {computeAnchoredScrollPosition, isPointInPaddedRect} from './zoom-util.js';
+import {
+    computeAnchoredScrollPosition,
+    computeScrollAnchorRatio,
+    isPointInPaddedRect,
+    measurePinch,
+    type Point,
+} from './zoom-util.js';
 
 // cspell:word dppx
+// cspell:word rasterizes
 
 export {type PagePointSize} from './page-layout.js';
 export {loadPdfDocument, PdfDocument} from './pdf-document.js';
@@ -52,6 +59,7 @@ export {
     type PdfSource,
     type PdfSourceOptions,
 } from './pdf-source.js';
+export {type Point} from './zoom-util.js';
 
 /**
  * All inputs for {@link PdfVir}.
@@ -160,6 +168,23 @@ const zoomToolbarHideDelay: AnyDuration = {
     seconds: 2,
 };
 const zoomToolbarHoverPaddingPx = 32;
+/**
+ * How hard a pinch pulls on the zoom, as an exponent on the ratio the fingers moved through. At 1 a
+ * pinch is physically exact: the content under the fingers tracks the fingers. That reads as too
+ * fast on a phone, where the span between a closed pinch and a full spread is a large multiple but
+ * only a few centimeters of travel, so a casual gesture slams into {@link zoomMax}. Below 1 the same
+ * spread covers less of the zoom range and the whole range stays reachable.
+ */
+const pinchZoomDamping = 0.7;
+/**
+ * How much of each new finger-distance measurement to believe, the rest being carried over from the
+ * running average. Fingers resting on glass wander by a pixel or two, which is a fraction of a
+ * percent of the span between them — small, except that the whole zoomed document moves to keep the
+ * anchored point still, so a 0.2% wobble in zoom is ten visible pixels of the page twitching.
+ * Ignoring changes below a threshold would trade the twitch for equally visible steps; averaging
+ * costs a couple of frames of lag instead, which a pinch is slow enough not to notice.
+ */
+const pinchDistanceSmoothing = 0.3;
 
 /**
  * All internal elements of {@link PdfVir} that you can pass styles or attributes to.
@@ -226,6 +251,292 @@ export type PageEntry = {
     /** Zero-based index of the page this canvas shows, used to drop entries once it unmounts. */
     pageIndex: number;
 };
+
+/**
+ * A request to change the zoom level, from either the toolbar buttons or a pinch.
+ *
+ * @category Internal
+ */
+export type ZoomRequest = {
+    /** Target zoom factor, clamped to the supported range before it is applied. */
+    scale: number;
+} & PartialWithUndefined<{
+    /**
+     * The point that should stay put, measured from the scrolling page list's top-left corner.
+     * Defaults to the middle of the visible area.
+     */
+    focalX: number;
+    focalY: number;
+    /**
+     * Where the focal point sits in the scroll content, as a fraction of the scroll dimensions.
+     * Omitted, it is measured from the current scroll position, which is right for a single zoom
+     * step but wrong for a gesture: each step would measure the scroll position the step before it
+     * set, so rounding and the browser clamping scroll to its limits feed back into the next
+     * measurement. That reads as the page jittering under the fingers. A gesture captures these
+     * once at the start instead, which makes every step a function of the layout alone.
+     */
+    scrollRatioX: number;
+    scrollRatioY: number;
+    /**
+     * Called once the new layout has settled and the scroll position has been re-anchored, which is
+     * a frame after the zoom is requested. A pinch uses this to pace itself: it holds its next
+     * update until the last one has landed, rather than piling requests onto a device that can't
+     * keep up.
+     */
+    onSettled: () => void;
+}>;
+
+/**
+ * State of an in-progress pinch, held outside of reactive state because every field changes as fast
+ * as fingers move and none of them belong in a re-render.
+ *
+ * @category Internal
+ */
+export type PinchWatchers = {
+    /** `abort()`ed to drop the gesture listeners from a `.scroll-container` being replaced. */
+    listeners: undefined | AbortController;
+    /**
+     * `abort()`ed the moment a pinch ends, dropping the listener that refuses two-finger scrolling.
+     *
+     * That listener has to be non-passive to refuse anything, and a non-passive `touchmove`
+     * listener makes the browser dispatch the event and wait for an answer before it may scroll —
+     * on every touch, including the one-finger scrolling that is most of what anyone does here.
+     * Attaching it only for the duration of a pinch keeps that latency out of the common case.
+     */
+    gestureListeners: undefined | AbortController;
+    /** Where each touching finger currently is, in client coordinates, keyed by pointer id. */
+    pointers: Map<number, Point>;
+    /**
+     * What the pinch is measured against, captured when the second finger lands. `undefined`
+     * whenever fewer than two fingers are down.
+     *
+     * The anchor is frozen here rather than followed: two fingers resting on glass jitter by a few
+     * pixels, and re-reading their midpoint every frame pushes that noise straight into the scroll
+     * position. Zooming about where the pinch began is both steadier and what the user means.
+     */
+    start:
+        | undefined
+        | {
+              distance: number;
+              zoomScale: number;
+              focalX: number;
+              focalY: number;
+              scrollRatioX: number;
+              scrollRatioY: number;
+          };
+    /** Running average of the finger separation, in place of the noisy raw measurement. */
+    smoothedDistance: undefined | number;
+    /** The most recent zoom the fingers ask for, waiting for the previous one to land. */
+    pending: undefined | {scale: number};
+    isApplying: boolean;
+    /**
+     * Whether two fingers are down right now. Read by the per-page render to hold off: a PDFium
+     * render is the one thing in this element long enough to be felt as a freeze, and a pinch is
+     * exactly when the user is watching the frame rate.
+     */
+    isPinching: boolean;
+};
+
+/**
+ * Turns two fingers on the scrolling page list into zoom, anchored so the content between the
+ * fingers stays between the fingers. Replaces whatever was watching the previous container, since
+ * `render` creates a fresh one whenever it switches between the loader, the error, and the pages.
+ *
+ * Zoom here is a real change in page width, not a `transform`, because page width is what feeds
+ * both the scroll-space math and the resolution PDFium re-renders at. That makes each step a layout
+ * pass, so this never runs more than one at a time: a move that arrives while the previous zoom is
+ * still settling replaces the pending one instead of queueing behind it. A slow device therefore
+ * zooms in fewer, larger steps rather than falling further behind the fingers.
+ */
+function watchPinchZoom({
+    scrollContainer,
+    pinchWatchers,
+    getZoomScale,
+    applyZoom,
+    onPinchEnd,
+}: {
+    scrollContainer: HTMLElement;
+    pinchWatchers: PinchWatchers;
+    getZoomScale: () => number;
+    applyZoom: {current: undefined | ((request: ZoomRequest) => void)};
+    /** Called once the last of the two fingers lifts, to render what the pinch held off. */
+    onPinchEnd: () => void;
+}): void {
+    pinchWatchers.listeners?.abort();
+    pinchWatchers.gestureListeners?.abort();
+    pinchWatchers.gestureListeners = undefined;
+    pinchWatchers.pointers.clear();
+    pinchWatchers.start = undefined;
+    pinchWatchers.smoothedDistance = undefined;
+    pinchWatchers.pending = undefined;
+    pinchWatchers.isApplying = false;
+    pinchWatchers.isPinching = false;
+
+    const abortController = new AbortController();
+    pinchWatchers.listeners = abortController;
+    const listenerOptions = {
+        signal: abortController.signal,
+    };
+
+    const readPinch = () => {
+        const points = [...pinchWatchers.pointers.values()];
+        return check.isLengthAtLeast(points, 2)
+            ? measurePinch({
+                  first: points[0],
+                  second: points[1],
+              })
+            : undefined;
+    };
+
+    /**
+     * `touch-action: pan-x pan-y` stops the browser from pinch-zooming the page, but it still reads
+     * a two-finger drag as a scroll — and once it commits to one it sends `pointercancel` and the
+     * pinch dies mid-gesture.
+     */
+    const refuseTwoFingerScroll = (event: TouchEvent) => {
+        if (event.touches.length >= 2) {
+            event.preventDefault();
+        }
+    };
+
+    /**
+     * Re-measures what the pinch is relative to. Called whenever a finger lands or lifts, so that
+     * adding or removing a third finger mid-gesture re-bases the zoom where it is instead of
+     * jumping to whatever the new finger spacing happens to imply.
+     */
+    const resetBaseline = () => {
+        const pinch = readPinch();
+        pinchWatchers.pending = undefined;
+        pinchWatchers.smoothedDistance = pinch?.distance;
+        if (pinch) {
+            const containerRect = scrollContainer.getBoundingClientRect();
+            const focalX = pinch.midpoint.x - containerRect.left;
+            const focalY = pinch.midpoint.y - containerRect.top;
+            pinchWatchers.start = {
+                distance: pinch.distance,
+                zoomScale: getZoomScale(),
+                focalX,
+                focalY,
+                scrollRatioX: computeScrollAnchorRatio({
+                    scrollOffset: scrollContainer.scrollLeft,
+                    focalOffset: focalX,
+                    scrollSize: scrollContainer.scrollWidth,
+                }),
+                scrollRatioY: computeScrollAnchorRatio({
+                    scrollOffset: scrollContainer.scrollTop,
+                    focalOffset: focalY,
+                    scrollSize: scrollContainer.scrollHeight,
+                }),
+            };
+            if (!pinchWatchers.gestureListeners) {
+                const gestureController = new AbortController();
+                pinchWatchers.gestureListeners = gestureController;
+                scrollContainer.addEventListener('touchmove', refuseTwoFingerScroll, {
+                    passive: false,
+                    signal: gestureController.signal,
+                });
+            }
+        } else {
+            pinchWatchers.start = undefined;
+            pinchWatchers.gestureListeners?.abort();
+            pinchWatchers.gestureListeners = undefined;
+        }
+
+        const wasPinching = pinchWatchers.isPinching;
+        /*
+         * Cleared before `onPinchEnd` runs, not after. Everything the gesture held off checks this
+         * flag, so calling out while it is still set means the redraw asked for there bails out and
+         * the page is left holding the browser's stretched copy.
+         */
+        pinchWatchers.isPinching = !!pinch;
+        if (wasPinching && !pinch) {
+            onPinchEnd();
+        }
+    };
+
+    const applyPending = () => {
+        const pending = pinchWatchers.pending;
+        const start = pinchWatchers.start;
+        const zoom = applyZoom.current;
+        if (pinchWatchers.isApplying || !pending || !start || !zoom) {
+            return;
+        }
+        pinchWatchers.pending = undefined;
+        pinchWatchers.isApplying = true;
+
+        zoom({
+            scale: pending.scale,
+            focalX: start.focalX,
+            focalY: start.focalY,
+            scrollRatioX: start.scrollRatioX,
+            scrollRatioY: start.scrollRatioY,
+            onSettled() {
+                pinchWatchers.isApplying = false;
+                applyPending();
+            },
+        });
+    };
+
+    scrollContainer.addEventListener(
+        'pointerdown',
+        (event) => {
+            /* A mouse has one pointer, so it can never pinch. */
+            if (event.pointerType === 'mouse') {
+                return;
+            }
+            pinchWatchers.pointers.set(event.pointerId, {
+                x: event.clientX,
+                y: event.clientY,
+            });
+            resetBaseline();
+        },
+        listenerOptions,
+    );
+    scrollContainer.addEventListener(
+        'pointermove',
+        (event) => {
+            if (!pinchWatchers.pointers.has(event.pointerId)) {
+                return;
+            }
+            pinchWatchers.pointers.set(event.pointerId, {
+                x: event.clientX,
+                y: event.clientY,
+            });
+
+            const start = pinchWatchers.start;
+            const pinch = readPinch();
+            /* Two fingers landing on the exact same spot give a ratio of nothing over nothing. */
+            if (!start || !pinch || !start.distance || !pinch.distance) {
+                return;
+            }
+            const smoothedDistance =
+                pinchWatchers.smoothedDistance == undefined
+                    ? pinch.distance
+                    : pinchWatchers.smoothedDistance +
+                      (pinch.distance - pinchWatchers.smoothedDistance) * pinchDistanceSmoothing;
+            pinchWatchers.smoothedDistance = smoothedDistance;
+
+            pinchWatchers.pending = {
+                scale: start.zoomScale * (smoothedDistance / start.distance) ** pinchZoomDamping,
+            };
+            applyPending();
+        },
+        listenerOptions,
+    );
+
+    const dropPointer = (event: PointerEvent) => {
+        if (pinchWatchers.pointers.delete(event.pointerId)) {
+            resetBaseline();
+        }
+    };
+    scrollContainer.addEventListener('pointerup', dropPointer, listenerOptions);
+    /*
+     * Fires when the browser takes the gesture over, which it still can despite `touch-action`.
+     * Without this the lifted fingers stay in the map forever and the next real pinch measures
+     * against stale positions.
+     */
+    scrollContainer.addEventListener('pointercancel', dropPointer, listenerOptions);
+}
 
 /**
  * Watches a `.scroll-container` for anything that changes which pages belong in the DOM: scrolling,
@@ -439,6 +750,13 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 gap: ${pageGapPx}px;
                 overflow-y: scroll;
                 overflow-x: auto;
+                /*
+             * Leaves one-finger panning to the browser, which scrolls far more smoothly than
+             * anything reimplemented here, while taking two-finger gestures away from it. Without
+             * this the browser handles a pinch itself by zooming the whole page, and it does so
+             * off the main thread, so the pointer events never even arrive as cancelable.
+             */
+                touch-action: pan-x pan-y;
             }
 
             .page-spacer {
@@ -699,6 +1017,25 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 resizeObserver: undefined as undefined | ResizeObserver,
                 pendingFrame: undefined as undefined | number,
             },
+            pinchWatchers: {
+                listeners: undefined,
+                gestureListeners: undefined,
+                pointers: new Map(),
+                start: undefined,
+                smoothedDistance: undefined,
+                pending: undefined,
+                isApplying: false,
+                isPinching: false,
+            } satisfies PinchWatchers as PinchWatchers,
+            /**
+             * Applies a new zoom level and re-anchors the scroll around it. Assigned in `init`;
+             * held here so the toolbar buttons and the pinch handlers, which are attached to a
+             * `.scroll-container` that `render` may replace, always reach the live implementation.
+             */
+            applyZoom: {
+                /** Undefined until `init` runs and again after `cleanup`. */
+                current: undefined as undefined | ((request: ZoomRequest) => void),
+            },
             pdfDocument: asyncProp({
                 async updateCallback({
                     pdfSource,
@@ -856,14 +1193,113 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             });
 
             if (
-                pageWindow.firstIndex !== state.pageWindow.firstIndex ||
-                pageWindow.lastIndex !== state.pageWindow.lastIndex
+                /*
+                 * Mounting and unmounting pages mid-pinch is the one layout change big enough to be
+                 * felt: it moves the spacers, which moves the scroll height, which the anchoring is
+                 * measured against — so the view lurches. Zooming out is the worst of it, since
+                 * that is when pages come back. The window is left alone until the fingers lift,
+                 * which keeps a pinch down to widening the pages already on screen.
+                 */
+                !state.pinchWatchers.isPinching &&
+                (pageWindow.firstIndex !== state.pageWindow.firstIndex ||
+                    pageWindow.lastIndex !== state.pageWindow.lastIndex)
             ) {
                 updateState({
                     pageWindow,
                 });
             }
         };
+
+        function applyZoom({
+            scale,
+            focalX,
+            focalY,
+            scrollRatioX,
+            scrollRatioY,
+            onSettled,
+        }: ZoomRequest) {
+            const previousScale = state.zoomScale;
+            const newScale = clamp(scale, {
+                min: zoomMin,
+                max: zoomMax,
+            });
+            const scrollContainer = host.shadowRoot.querySelector('.scroll-container');
+            if (
+                !(scrollContainer instanceof HTMLElement) ||
+                Math.abs(newScale - previousScale) < epsilon
+            ) {
+                /*
+                 * Nothing will move, so nothing will settle. A pinch pushed against the zoom limit
+                 * still needs to hear back or it stops asking.
+                 */
+                onSettled?.();
+                return;
+            }
+            /*
+             * Where the pinned point sits in the scroll content, measured *before* the zoom is
+             * applied so it can be restored against the new layout below. Without this, zooming
+             * visually shifts the part of the page the user was looking at — they'd zoom in
+             * expecting that spot to stay put, but the layout grows from a different anchor
+             * instead. A gesture supplies these instead of having them measured, so that its steps
+             * don't feed off each other.
+             */
+            const anchorX = focalX ?? scrollContainer.clientWidth / 2;
+            const anchorY = focalY ?? scrollContainer.clientHeight / 2;
+            const anchorRatioX =
+                scrollRatioX ??
+                computeScrollAnchorRatio({
+                    scrollOffset: scrollContainer.scrollLeft,
+                    focalOffset: anchorX,
+                    scrollSize: scrollContainer.scrollWidth,
+                });
+            const anchorRatioY =
+                scrollRatioY ??
+                computeScrollAnchorRatio({
+                    scrollOffset: scrollContainer.scrollTop,
+                    focalOffset: anchorY,
+                    scrollSize: scrollContainer.scrollHeight,
+                });
+
+            updateState({
+                zoomScale: newScale,
+            });
+            /*
+             * Every mounted page is now displayed at a size its canvas was not drawn at, so mark
+             * them all stale — including the ones off screen, which would otherwise scroll back in
+             * still holding the old bitmap. Zooming out has to do this too: skipping the redraw
+             * there (a canvas with surplus pixels still looks right scaled down) is what made a
+             * clean page tear again on the way back out.
+             */
+            state.pageEntries.forEach((pageEntry) => {
+                pageEntry.invalidateResolution();
+            });
+            /*
+             * Held until the zooming settles, which collapses a run of toolbar clicks into one
+             * round of renders and keeps a PDFium render out of a pinch's frame budget.
+             */
+            state.rerenderDebounce.execute();
+
+            requestAnimationFrame(() => {
+                const {scrollLeft, scrollTop} = computeAnchoredScrollPosition({
+                    scrollRatioX: anchorRatioX,
+                    scrollRatioY: anchorRatioY,
+                    focalX: anchorX,
+                    focalY: anchorY,
+                    newScrollWidth: scrollContainer.scrollWidth,
+                    newScrollHeight: scrollContainer.scrollHeight,
+                });
+                scrollContainer.scrollLeft = scrollLeft;
+                scrollContainer.scrollTop = scrollTop;
+                /*
+                 * Zoom changes both how tall each page is and how many fit on screen. Assigning the
+                 * scroll position usually fires a scroll event that would refresh the window
+                 * anyway, but not when the anchored position lands exactly where it already was.
+                 */
+                state.refreshPageWindow.current?.();
+                onSettled?.();
+            });
+        }
+        state.applyZoom.current = applyZoom;
 
         const abortController = new AbortController();
         state.hostListeners.current = abortController;
@@ -926,7 +1362,12 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         if (state.scrollWatchers.pendingFrame != undefined) {
             cancelAnimationFrame(state.scrollWatchers.pendingFrame);
         }
+        state.pinchWatchers.listeners?.abort();
+        state.pinchWatchers.gestureListeners?.abort();
+        state.pinchWatchers.pointers.clear();
+        state.pinchWatchers.isPinching = false;
         state.refreshPageWindow.current = undefined;
+        state.applyZoom.current = undefined;
         state.toolbarHideDebounce.callback = undefined;
         state.rerenderDebounce.callback = undefined;
         state.hostListeners.current?.abort();
@@ -939,7 +1380,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             /* A failed load has nothing to free. */
         });
     },
-    render({state, updateState, inputs, dispatch, events, host, cssVars}) {
+    render({state, updateState, inputs, dispatch, events, cssVars}) {
         const pdfSource = inputs.pdfSource;
         const sourceKey = toPdfSourceKey(pdfSource);
         /*
@@ -1004,63 +1445,6 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         const canZoomOut = state.zoomScale > zoomMin + epsilon;
         const canResetZoom = Math.abs(state.zoomScale - defaultZoomScale) > epsilon;
 
-        const updateZoom = (next: number) => {
-            const previousScale = state.zoomScale;
-            const newScale = clamp(next, {
-                min: zoomMin,
-                max: zoomMax,
-            });
-            if (Math.abs(newScale - previousScale) < epsilon) {
-                return;
-            }
-            const scrollContainer = host.shadowRoot.querySelector('.scroll-container');
-            assert.instanceOf(scrollContainer, HTMLElement);
-            /*
-             * Capture the viewport's center in scroll-content coordinates *before* the zoom is
-             * applied, then re-anchor it to the same content point after the new layout settles.
-             * Without this, zooming visually shifts the part of the page the user was looking at
-             * — they'd zoom in expecting the center to stay put, but the layout grows from a
-             * different anchor instead.
-             */
-            const oldScrollLeft = scrollContainer.scrollLeft;
-            const oldScrollTop = scrollContainer.scrollTop;
-            const viewWidth = scrollContainer.clientWidth;
-            const viewHeight = scrollContainer.clientHeight;
-            const oldScrollWidth = scrollContainer.scrollWidth;
-            const oldScrollHeight = scrollContainer.scrollHeight;
-
-            updateState({
-                zoomScale: newScale,
-            });
-            /*
-             * Zoom scales already-rendered canvases with CSS, which softens them past the
-             * resolution they were rendered at. Re-render the pages on screen once the zooming
-             * settles so they sharpen back up.
-             */
-            state.rerenderDebounce.execute();
-
-            requestAnimationFrame(() => {
-                const {scrollLeft, scrollTop} = computeAnchoredScrollPosition({
-                    oldScrollLeft,
-                    oldScrollTop,
-                    oldScrollWidth,
-                    oldScrollHeight,
-                    viewWidth,
-                    viewHeight,
-                    newScrollWidth: scrollContainer.scrollWidth,
-                    newScrollHeight: scrollContainer.scrollHeight,
-                });
-                scrollContainer.scrollLeft = scrollLeft;
-                scrollContainer.scrollTop = scrollTop;
-                /*
-                 * Zoom changes both how tall each page is and how many fit on screen. Assigning the
-                 * scroll position usually fires a scroll event that would refresh the window
-                 * anyway, but not when the anchored position lands exactly where it already was.
-                 */
-                state.refreshPageWindow.current?.();
-            });
-        };
-
         const toolbar =
             inputs.enableZoomControls && pdfReady
                 ? html`
@@ -1076,7 +1460,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                               ?disabled=${!canZoomOut}
                               ${attributes(inputs.attributePassthrough?.['zoom-button'])}
                               style=${ifDefined(inputs.stylePassthrough?.['zoom-button'])}
-                              @click=${() => updateZoom(state.zoomScale / zoomStepFactor)}
+                              @click=${() => {
+                                  state.applyZoom.current?.({
+                                      scale: state.zoomScale / zoomStepFactor,
+                                  });
+                              }}
                           >
                               <${ViraIcon.assign({
                                   icon: lucideIcons.ZoomOut,
@@ -1089,7 +1477,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                               ?disabled=${!canZoomIn}
                               ${attributes(inputs.attributePassthrough?.['zoom-button'])}
                               style=${ifDefined(inputs.stylePassthrough?.['zoom-button'])}
-                              @click=${() => updateZoom(state.zoomScale * zoomStepFactor)}
+                              @click=${() => {
+                                  state.applyZoom.current?.({
+                                      scale: state.zoomScale * zoomStepFactor,
+                                  });
+                              }}
                           >
                               <${ViraIcon.assign({
                                   icon: lucideIcons.ZoomIn,
@@ -1103,7 +1495,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                               ?disabled=${!canResetZoom}
                               ${attributes(inputs.attributePassthrough?.['zoom-button'])}
                               style=${ifDefined(inputs.stylePassthrough?.['zoom-button'])}
-                              @click=${() => updateZoom(defaultZoomScale)}
+                              @click=${() => {
+                                  state.applyZoom.current?.({
+                                      scale: defaultZoomScale,
+                                  });
+                              }}
                           >
                               <${ViraIcon.assign({
                                   icon: lucideIcons.RotateCcw,
@@ -1195,6 +1591,33 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                         scrollContainer,
                         scrollWatchers: state.scrollWatchers,
                         refresh: () => state.refreshPageWindow.current?.(),
+                    });
+                    watchPinchZoom({
+                        scrollContainer,
+                        pinchWatchers: state.pinchWatchers,
+                        getZoomScale: () => state.zoomScale,
+                        applyZoom: state.applyZoom,
+                        onPinchEnd: () => {
+                            /*
+                             * Catch up on both things the gesture held off, and redraw right away
+                             * rather than waiting out the re-render debounce. That delay exists to
+                             * collapse repeated toolbar clicks; a lifted finger is already the end
+                             * of the gesture, and every extra millisecond is one more the page
+                             * spends showing the browser's stretched copy of the old render. A
+                             * debounced pass may still land afterwards; it finds every page already
+                             * drawn at this zoom and does nothing.
+                             *
+                             */
+                            state.refreshPageWindow.current?.();
+                            state.pageEntries.forEach((pageEntry) => {
+                                pageEntry.invalidateResolution();
+                            });
+                            state.pageEntries.forEach((pageEntry) => {
+                                if (pageEntry.isVisible) {
+                                    void pageEntry.render();
+                                }
+                            });
+                        },
                     });
                 })}
             >
@@ -1289,15 +1712,17 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
                                         const startRender = async () => {
                                             /*
-                                             * Bail when a render is already in flight, when this
-                                             * page has failed too many times to be worth another
-                                             * attempt, or when it already rendered at the current
-                                             * zoom or higher: a canvas with more pixels than it
-                                             * needs still looks right scaled down, so only zooming
-                                             * in warrants a re-render.
+                                             * Bail when a render is already in flight, when fingers
+                                             * are mid-pinch (`onPinchEnd` re-triggers what was held
+                                             * off), when this page has failed too many times to be
+                                             * worth another attempt, or when it already rendered at
+                                             * the current zoom or higher: a canvas with more pixels
+                                             * than it needs still looks right scaled down, so only
+                                             * zooming in warrants a re-render.
                                              */
                                             if (
                                                 isRendering ||
+                                                state.pinchWatchers.isPinching ||
                                                 failedRenderCount >= maxRenderAttempts ||
                                                 (renderedZoom != undefined &&
                                                     (isAtMaxResolution ||

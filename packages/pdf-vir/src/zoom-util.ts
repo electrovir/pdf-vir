@@ -1,39 +1,87 @@
 /**
- * Computes the scroll-container scroll positions that keep the same content point at the visual
- * center of the viewport across a zoom (or any layout change that scales the scroll dimensions).
- * Captures the visible-center as a ratio of the old scroll dimensions, then applies that ratio to
- * the new scroll dimensions and subtracts half the viewport so the center aligns.
+ * A point in pixels. Which corner it is measured from depends on the function taking it.
  *
- * Both axes are computed independently. When the content fits the viewport (no overflow),
- * `oldScrollWidth` equals `viewWidth` and the ratio collapses to 0.5 — the new scroll position
- * lands at exactly half the new overflow, centering the content in the viewport.
+ * @category Internal
+ */
+export type Point = {
+    x: number;
+    y: number;
+};
+
+/**
+ * Locates a focal point within the scroll content as a fraction of one scroll dimension, which is
+ * the form that survives the content being resized.
+ *
+ * A zero-sized scroll dimension means nothing is laid out yet; anchoring to the start is the only
+ * answer that isn't a division by zero.
+ *
+ * @category Internal
+ */
+export function computeScrollAnchorRatio({
+    scrollOffset,
+    focalOffset,
+    scrollSize,
+}: {
+    /** How far the container is currently scrolled along this axis. */
+    scrollOffset: number;
+    /** Distance from the viewport's leading edge to the point that should not move. */
+    focalOffset: number;
+    scrollSize: number;
+}): number {
+    return scrollSize > 0 ? (scrollOffset + focalOffset) / scrollSize : 0;
+}
+
+/**
+ * Computes the scroll-container scroll positions that put an anchored content point back under the
+ * focal point, once a zoom (or any layout change that scales the scroll dimensions) has resized the
+ * content.
+ *
+ * The focal point is what the user expects to stay still: the middle of the viewport for the zoom
+ * buttons, and the point the fingers started at for a pinch.
+ *
+ * Both axes are computed independently. When the content fits the viewport (no overflow) and the
+ * focal point is the viewport center, the ratio is 0.5 — the new scroll position lands at exactly
+ * half the new overflow, centering the content in the viewport.
  *
  * @category Internal
  */
 export function computeAnchoredScrollPosition({
-    oldScrollLeft,
-    oldScrollTop,
-    oldScrollWidth,
-    oldScrollHeight,
-    viewWidth,
-    viewHeight,
+    scrollRatioX,
+    scrollRatioY,
+    focalX,
+    focalY,
     newScrollWidth,
     newScrollHeight,
 }: {
-    oldScrollLeft: number;
-    oldScrollTop: number;
-    oldScrollWidth: number;
-    oldScrollHeight: number;
-    viewWidth: number;
-    viewHeight: number;
+    /** From {@link computeScrollAnchorRatio}, measured before the content was resized. */
+    scrollRatioX: number;
+    scrollRatioY: number;
+    /** Distance from the viewport's left edge to the point that should not move. */
+    focalX: number;
+    /** Distance from the viewport's top edge to the point that should not move. */
+    focalY: number;
     newScrollWidth: number;
     newScrollHeight: number;
 }): {scrollLeft: number; scrollTop: number} {
-    const centerXRatio = (oldScrollLeft + viewWidth / 2) / oldScrollWidth;
-    const centerYRatio = (oldScrollTop + viewHeight / 2) / oldScrollHeight;
     return {
-        scrollLeft: centerXRatio * newScrollWidth - viewWidth / 2,
-        scrollTop: centerYRatio * newScrollHeight - viewHeight / 2,
+        scrollLeft: scrollRatioX * newScrollWidth - focalX,
+        scrollTop: scrollRatioY * newScrollHeight - focalY,
+    };
+}
+
+/**
+ * The two numbers a pinch gesture is made of: how far apart the fingers are, which drives how far
+ * to zoom, and the point halfway between them, which drives what to zoom toward.
+ *
+ * @category Internal
+ */
+export function measurePinch({first, second}: {first: Readonly<Point>; second: Readonly<Point>}) {
+    return {
+        distance: Math.hypot(second.x - first.x, second.y - first.y),
+        midpoint: {
+            x: (first.x + second.x) / 2,
+            y: (first.y + second.y) / 2,
+        },
     };
 }
 
@@ -49,7 +97,7 @@ export function isPointInPaddedRect({
     rect,
     padding,
 }: {
-    point: {x: number; y: number};
+    point: Readonly<Point>;
     rect: {left: number; top: number; right: number; bottom: number};
     padding: number;
 }): boolean {

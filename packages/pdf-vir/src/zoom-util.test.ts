@@ -1,17 +1,62 @@
-import {describe, itCases} from '@augment-vir/test';
-import {computeAnchoredScrollPosition, isPointInPaddedRect} from './zoom-util.js';
+import {assert} from '@augment-vir/assert';
+import {describe, it, itCases} from '@augment-vir/test';
+import {
+    computeAnchoredScrollPosition,
+    computeScrollAnchorRatio,
+    isPointInPaddedRect,
+    measurePinch,
+} from './zoom-util.js';
+
+describe(computeScrollAnchorRatio.name, () => {
+    itCases(computeScrollAnchorRatio, [
+        {
+            it: 'puts the center of an exactly-fitting axis at the halfway mark when not scrolled',
+            input: {
+                scrollOffset: 0,
+                focalOffset: 300,
+                scrollSize: 600,
+            },
+            expect: 0.5,
+        },
+        {
+            it: 'counts how far the container is already scrolled',
+            input: {
+                scrollOffset: 200,
+                focalOffset: 300,
+                scrollSize: 1000,
+            },
+            expect: 0.5,
+        },
+        {
+            it: 'locates a focal point near the leading edge',
+            input: {
+                scrollOffset: 0,
+                focalOffset: 60,
+                scrollSize: 600,
+            },
+            expect: 0.1,
+        },
+        {
+            it: 'anchors to the start rather than dividing by an axis with no size yet',
+            input: {
+                scrollOffset: 0,
+                focalOffset: 300,
+                scrollSize: 0,
+            },
+            expect: 0,
+        },
+    ]);
+});
 
 describe(computeAnchoredScrollPosition.name, () => {
     itCases(computeAnchoredScrollPosition, [
         {
             it: 'centers the scroll when zooming from a fitting layout into overflow',
             input: {
-                oldScrollLeft: 0,
-                oldScrollTop: 0,
-                oldScrollWidth: 600,
-                oldScrollHeight: 800,
-                viewWidth: 600,
-                viewHeight: 800,
+                scrollRatioX: 0.5,
+                scrollRatioY: 0.5,
+                focalX: 300,
+                focalY: 400,
                 newScrollWidth: 1200,
                 newScrollHeight: 1600,
             },
@@ -21,25 +66,23 @@ describe(computeAnchoredScrollPosition.name, () => {
             },
         },
         {
-            it: 'preserves the visible center when both axes scale uniformly',
+            it: 'holds an off-center focal point in place, not the viewport center',
             /*
-             * Visible center pre-zoom: (oldScrollLeft + viewWidth/2, oldScrollTop + viewHeight/2)
-             *   = (200 + 300, 100 + 400) = (500, 500). Ratios: 500/1000 = 0.5, 500/1000 = 0.5.
-             * Post-zoom (doubled): scrollLeft = 0.5 * 2000 - 300 = 700; scrollTop = 0.5 * 2000 - 400 = 600.
+             * A pinch that began near the top left of a 600x800 viewport, on content 0.1 of the
+             * way into each axis. Doubling the layout puts that content at (120, 160), so the
+             * scroll has to move by (120 - 60, 160 - 80) to leave it under the fingers.
              */
             input: {
-                oldScrollLeft: 200,
-                oldScrollTop: 100,
-                oldScrollWidth: 1000,
-                oldScrollHeight: 1000,
-                viewWidth: 600,
-                viewHeight: 800,
-                newScrollWidth: 2000,
-                newScrollHeight: 2000,
+                scrollRatioX: 0.1,
+                scrollRatioY: 0.1,
+                focalX: 60,
+                focalY: 80,
+                newScrollWidth: 1200,
+                newScrollHeight: 1600,
             },
             expect: {
-                scrollLeft: 700,
-                scrollTop: 600,
+                scrollLeft: 60,
+                scrollTop: 80,
             },
         },
         {
@@ -47,23 +90,138 @@ describe(computeAnchoredScrollPosition.name, () => {
             /*
              * Caller (the browser) is expected to clamp negative scroll positions to 0; the
              * math here is correct — a non-overflowing layout has no scrollable region.
-             *
-             * centerXRatio = (100 + 300) / 1000 = 0.4 → scrollLeft = 0.4 * 600 - 300 = -60
-             * centerYRatio = (50 + 400) / 1000 = 0.45 → scrollTop = 0.45 * 800 - 400 = -40
              */
             input: {
-                oldScrollLeft: 100,
-                oldScrollTop: 50,
-                oldScrollWidth: 1000,
-                oldScrollHeight: 1000,
-                viewWidth: 600,
-                viewHeight: 800,
+                scrollRatioX: 0.4,
+                scrollRatioY: 0.45,
+                focalX: 300,
+                focalY: 400,
                 newScrollWidth: 600,
                 newScrollHeight: 800,
             },
             expect: {
                 scrollLeft: -60,
                 scrollTop: -40,
+            },
+        },
+    ]);
+
+    it('leaves the scroll where it is when the content did not resize', () => {
+        /*
+         * What a pinch step that changed nothing must do. Measuring and restoring has to be exactly
+         * circular, or repeated steps would walk the page across the screen.
+         */
+        const focalX = 137;
+        const focalY = 421;
+        const scrollWidth = 1739;
+        const scrollHeight = 5081;
+
+        assert.deepEquals(
+            computeAnchoredScrollPosition({
+                scrollRatioX: computeScrollAnchorRatio({
+                    scrollOffset: 613,
+                    focalOffset: focalX,
+                    scrollSize: scrollWidth,
+                }),
+                scrollRatioY: computeScrollAnchorRatio({
+                    scrollOffset: 2044,
+                    focalOffset: focalY,
+                    scrollSize: scrollHeight,
+                }),
+                focalX,
+                focalY,
+                newScrollWidth: scrollWidth,
+                newScrollHeight: scrollHeight,
+            }),
+            {
+                scrollLeft: 613,
+                scrollTop: 2044,
+            },
+        );
+    });
+});
+
+describe(measurePinch.name, () => {
+    itCases(measurePinch, [
+        {
+            it: 'measures two fingers spread along one axis',
+            input: {
+                first: {
+                    x: 100,
+                    y: 200,
+                },
+                second: {
+                    x: 300,
+                    y: 200,
+                },
+            },
+            expect: {
+                distance: 200,
+                midpoint: {
+                    x: 200,
+                    y: 200,
+                },
+            },
+        },
+        {
+            it: 'measures a diagonal spread',
+            input: {
+                first: {
+                    x: 0,
+                    y: 0,
+                },
+                second: {
+                    x: 30,
+                    y: 40,
+                },
+            },
+            expect: {
+                distance: 50,
+                midpoint: {
+                    x: 15,
+                    y: 20,
+                },
+            },
+        },
+        {
+            it: 'does not care which finger came first',
+            input: {
+                first: {
+                    x: 30,
+                    y: 40,
+                },
+                second: {
+                    x: 0,
+                    y: 0,
+                },
+            },
+            expect: {
+                distance: 50,
+                midpoint: {
+                    x: 15,
+                    y: 20,
+                },
+            },
+        },
+        {
+            it: 'reports zero for two fingers at the same spot',
+            /* The caller has to skip this rather than divide by it. */
+            input: {
+                first: {
+                    x: 50,
+                    y: 50,
+                },
+                second: {
+                    x: 50,
+                    y: 50,
+                },
+            },
+            expect: {
+                distance: 0,
+                midpoint: {
+                    x: 50,
+                    y: 50,
+                },
             },
         },
     ]);
