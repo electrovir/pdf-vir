@@ -6,6 +6,7 @@ import {
     computePageSpacerHeights,
     computePageWindow,
     getPageAspectRatio,
+    getPageIntrinsicWidth,
     type PagePointSize,
 } from './page-layout.js';
 
@@ -44,6 +45,29 @@ describe(getPageAspectRatio.name, () => {
                 heightPoints: 0,
             },
             expect: 8.5 / 11,
+        },
+    ]);
+});
+
+describe(getPageIntrinsicWidth.name, () => {
+    itCases(getPageIntrinsicWidth, [
+        {
+            it: 'uses the reported page width',
+            input: letterPage,
+            expect: 612,
+        },
+        {
+            it: 'falls back to the letter width for an unreported size',
+            input: undefined,
+            expect: 8.5 * 72,
+        },
+        {
+            it: 'falls back rather than asking for no width at all',
+            input: {
+                widthPoints: 0,
+                heightPoints: 792,
+            },
+            expect: 8.5 * 72,
         },
     ]);
 });

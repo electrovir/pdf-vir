@@ -1,5 +1,7 @@
 /** Aspect ratio used for a page whose size PDFium couldn't report. */
 const fallbackPageRatio = 8.5 / 11;
+/** US letter width in points, for a page PDFium couldn't measure. */
+const fallbackPageWidthPoints = 8.5 * 72;
 
 /**
  * A page's intrinsic size in PDF points (1/72 inch).
@@ -22,6 +24,16 @@ export function getPageAspectRatio(pageSize: undefined | PagePointSize): number 
     return pageSize && pageSize.widthPoints > 0 && pageSize.heightPoints > 0
         ? pageSize.widthPoints / pageSize.heightPoints
         : fallbackPageRatio;
+}
+
+/**
+ * A page's own width in points, one CSS pixel per point. Feeds `contain-intrinsic-width` on the
+ * canvas wrapper, so a content-sized ancestor measures the document instead of the layout.
+ *
+ * @category Internal
+ */
+export function getPageIntrinsicWidth(pageSize: undefined | PagePointSize): number {
+    return pageSize && pageSize.widthPoints > 0 ? pageSize.widthPoints : fallbackPageWidthPoints;
 }
 
 /**

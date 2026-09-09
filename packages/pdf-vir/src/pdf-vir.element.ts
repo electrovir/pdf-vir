@@ -1,4 +1,4 @@
-import {assert, check} from '@augment-vir/assert';
+import {assert, assertWrap, check} from '@augment-vir/assert';
 import {
     clamp,
     createArray,
@@ -30,6 +30,7 @@ import {
     computePageSpacerHeights,
     computePageWindow,
     getPageAspectRatio,
+    getPageIntrinsicWidth,
     type PagePointSize,
 } from './page-layout.js';
 import {loadPdfDocument, type PdfDocument} from './pdf-document.js';
@@ -159,6 +160,11 @@ const scrollPaddingPx = 32;
 const rerenderDelay: AnyDuration = {
     milliseconds: 300,
 };
+/**
+ * How far the laid-out page width may drift from the width the pages were drawn at before they
+ * re-render. A PDFium render is too expensive to spend on a difference nobody can see.
+ */
+const resizeRenderRatio = 0.1;
 const zoomMin = 0.5;
 const zoomMax = 4;
 const zoomStepFactor = 1.25;
@@ -211,6 +217,20 @@ export type PdfLoadEventDetail = {
     pdfDocument: PdfDocument;
     pdfSource: PdfSource;
 };
+
+/**
+ * How a {@link scrollPdfToPage} request ended.
+ *
+ * @category Main
+ */
+export enum PdfScrollResult {
+    /** The page list moved and the requested page is mounted. */
+    Scrolled = 'scrolled',
+    /** A newer request replaced this one while it waited for the load. */
+    Superseded = 'superseded',
+    /** The PDF source changed, or the element was removed, before this request ran. */
+    Dropped = 'dropped',
+}
 
 /**
  * Reads a numeric `navigator` property that not every browser implements, such as the Chromium-only
@@ -722,10 +742,10 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 height: 800px;
                 max-width: 100%;
                 /*
-             * Host is the positioning context for the absolutely-placed zoom toolbar but does
-             * not scroll itself — that role belongs to the inner .scroll-container. This keeps
-             * the toolbar pinned over the host while pages scroll or zoom underneath.
-             */
+                 * Host is the positioning context for the absolutely-placed zoom toolbar but does
+                 * not scroll itself — that role belongs to the inner .scroll-container. This keeps
+                 * the toolbar pinned over the host while pages scroll or zoom underneath.
+                 */
                 position: relative;
                 overflow: hidden;
             }
@@ -738,34 +758,35 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 display: flex;
                 flex-direction: column;
                 /*
-             * Center children on the cross (horizontal) axis so zoomed canvas-wrappers grow
-             * equally in both directions instead of extending only to the right. The 'safe'
-             * keyword is critical: with plain 'center', a child wider than this container can't
-             * be scrolled past its centered flex position (the left portion becomes
-             * unreachable). 'safe center' falls back to 'flex-start' when overflow would
-             * otherwise hide content, keeping both edges scrollable while still centering
-             * content that fits.
-             */
+                 * Center children on the cross (horizontal) axis so zoomed canvas-wrappers grow
+                 * equally in both directions instead of extending only to the right. The 'safe'
+                 * keyword is critical: with plain 'center', a child wider than this container can't
+                 * be scrolled past its centered flex position (the left portion becomes
+                 * unreachable). 'safe center' falls back to 'flex-start' when overflow would
+                 * otherwise hide content, keeping both edges scrollable while still centering
+                 * content that fits.
+                 */
                 align-items: safe center;
                 gap: ${pageGapPx}px;
                 overflow-y: scroll;
                 overflow-x: auto;
                 /*
-             * Leaves one-finger panning to the browser, which scrolls far more smoothly than
-             * anything reimplemented here, while taking two-finger gestures away from it. Without
-             * this the browser handles a pinch itself by zooming the whole page, and it does so
-             * off the main thread, so the pointer events never even arrive as cancelable.
-             */
+                 * Leaves one-finger panning to the browser, which scrolls far more smoothly than
+                 * anything reimplemented here, while taking two-finger gestures away from it.
+                 * Without this the browser handles a pinch itself by zooming the whole page, and it
+                 * does so off the main thread, so the pointer events never even arrive as
+                 * cancelable.
+                 */
                 touch-action: pan-x pan-y;
             }
 
             .page-spacer {
                 width: 100%;
                 /*
-             * Holds open the scroll space for the pages that aren't in the DOM. Not shrinking is
-             * the whole point: these have no content, so nothing else would stop the column from
-             * squeezing them to nothing and collapsing the scrollbar.
-             */
+                 * Holds open the scroll space for the pages that aren't in the DOM. Not shrinking
+                 * is the whole point: these have no content, so nothing else would stop the column
+                 * from squeezing them to nothing and collapsing the scrollbar.
+                 */
                 flex-shrink: 0;
             }
 
@@ -773,11 +794,18 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 position: relative;
                 box-sizing: border-box;
                 /*
-             * Multiplies the wrapper width by the current zoom factor (defaults to 1 when zoom
-             * controls are disabled). Zoom > 1 makes the wrapper exceed the host's content width
-             * and triggers horizontal scrolling.
-             */
+                 * Multiplies the wrapper width by the current zoom factor (defaults to 1 when zoom
+                 * controls are disabled). Zoom > 1 makes the wrapper exceed the host's content
+                 * width and triggers horizontal scrolling.
+                 */
                 width: calc(100% * ${cssVars['pdf-vir-zoom-scale'].value});
+                /*
+                 * A canvas's width attribute is its intrinsic width, and it holds the render buffer
+                 * in device pixels. Without this, a content-sized ancestor grows on every render
+                 * and shrinks on every eviction: the flicker in a resizable pane. Block size is
+                 * unaffected, so aspect-ratio still holds each page's space.
+                 */
+                contain: inline-size;
             }
 
             canvas {
@@ -809,11 +837,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
 
             .zoom-toolbar {
                 /*
-             * Absolutely positioned over the host so it doesn't move when the inner scroll
-             * container scrolls (vertically or horizontally) or when the user zooms.
-             * translateX(-50%) keeps the pill centered against left:50% regardless of its
-             * own width.
-             */
+                 * Absolutely positioned over the host so it doesn't move when the inner scroll
+                 * container scrolls (vertically or horizontally) or when the user zooms.
+                 * translateX(-50%) keeps the pill centered against left:50% regardless of its own
+                 * width.
+                 */
                 position: absolute;
                 top: 8px;
                 left: 50%;
@@ -1000,6 +1028,14 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 current: globalThis.devicePixelRatio || 1,
             },
             /**
+             * The width the mounted pages were drawn at, in CSS pixels at zoom 1, or `undefined`
+             * before the first render. Compared on resize so a widened pane redraws its pages
+             * instead of stretching the old bitmaps.
+             */
+            renderedContentWidth: {
+                current: undefined as undefined | number,
+            },
+            /**
              * Recomputes which pages belong in the DOM from the current scroll position. Assigned
              * in `init`; held here so the scroll and resize listeners, which are attached to a
              * `.scroll-container` that `render` may replace, always reach the live implementation.
@@ -1035,6 +1071,21 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             applyZoom: {
                 /** Undefined until `init` runs and again after `cleanup`. */
                 current: undefined as undefined | ((request: ZoomRequest) => void),
+            },
+            /** Holders for scroll-to-page requests, driven by {@link scrollPdfToPage}. */
+            scrollRequests: {
+                /** Runs a request. Assigned in `init`, cleared in `cleanup`. */
+                scroll: undefined as undefined | ((pageNumber: number) => Promise<PdfScrollResult>),
+                /**
+                 * A request that arrived before the document had pages to scroll to, held until it
+                 * does. Only the newest is kept.
+                 */
+                pending: undefined as
+                    | undefined
+                    | {
+                          pageNumber: number;
+                          deferred: DeferredPromise<PdfScrollResult>;
+                      },
             },
             pdfDocument: asyncProp({
                 async updateCallback({
@@ -1181,6 +1232,24 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 contentWidth,
             };
 
+            const renderedContentWidth = state.renderedContentWidth.current;
+            if (renderedContentWidth == undefined) {
+                /* Nothing has rendered yet, so the next render already uses this width. */
+                state.renderedContentWidth.current = contentWidth;
+            } else if (
+                /* A pinch changes page width through the zoom factor, and re-renders on its own. */
+                !state.pinchWatchers.isPinching &&
+                Math.abs(contentWidth - renderedContentWidth) / renderedContentWidth >
+                    resizeRenderRatio
+            ) {
+                state.renderedContentWidth.current = contentWidth;
+                state.pageEntries.forEach((pageEntry) => {
+                    pageEntry.invalidateResolution();
+                });
+                /* Debounced, so a pane drag renders once at the end rather than once per frame. */
+                state.rerenderDebounce.execute();
+            }
+
             const pageWindow = computePageWindow({
                 layout: computePageLayout({
                     pageSizes,
@@ -1208,6 +1277,8 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                     pageWindow,
                 });
             }
+
+            flushPendingScroll();
         };
 
         function applyZoom({
@@ -1301,6 +1372,91 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         }
         state.applyZoom.current = applyZoom;
 
+        /**
+         * Puts the given page at the top of the view, if the document knows where that is yet.
+         * Returns whether it did. Throws for a page this document doesn't have.
+         */
+        function scrollToPage(pageNumber: number): boolean {
+            const pageSizes = state.pageSizes.current;
+            const scrollContainer = host.shadowRoot.querySelector('.scroll-container');
+            if (
+                !pageSizes ||
+                !(scrollContainer instanceof HTMLElement) ||
+                !state.scrollMetrics.current.contentWidth
+            ) {
+                return false;
+            } else if (pageNumber > pageSizes.length) {
+                throw new Error(
+                    `Cannot scroll to page ${pageNumber}: this PDF has ${pageSizes.length} pages.`,
+                );
+            }
+
+            const pageTop = assertWrap.isDefined(
+                computePageLayout({
+                    pageSizes,
+                    pageWidth: state.scrollMetrics.current.contentWidth * state.zoomScale,
+                    gap: pageGapPx,
+                }).tops[pageNumber - 1],
+            );
+            /* Page offsets start at the first page, which sits one padding in. */
+            scrollContainer.scrollTop = pageTop + scrollPaddingPx;
+            /* The scroll event covers this, except when the position didn't actually change. */
+            state.refreshPageWindow.current?.();
+            return true;
+        }
+
+        /**
+         * Runs a queued request once there's a document to run it against. Called at the end of
+         * every page window refresh, where a freshly loaded document is first measured.
+         */
+        function flushPendingScroll() {
+            const pending = state.scrollRequests.pending;
+            if (!pending) {
+                return;
+            }
+            /* Cleared first: the scroll below refreshes the window, which lands back here. */
+            state.scrollRequests.pending = undefined;
+            try {
+                if (scrollToPage(pending.pageNumber)) {
+                    pending.deferred.resolve(PdfScrollResult.Scrolled);
+                } else {
+                    state.scrollRequests.pending = pending;
+                }
+            } catch (error) {
+                pending.deferred.reject(ensureError(error));
+            }
+        }
+
+        /**
+         * A second pass at the same page. The first pass mounts pages, which re-renders and moves
+         * the layout it was aimed at, so it can land short.
+         */
+        async function settleScrollToPage(pageNumber: number) {
+            await host.updateComplete;
+            scrollToPage(pageNumber);
+            await host.updateComplete;
+            return PdfScrollResult.Scrolled;
+        }
+
+        state.scrollRequests.scroll = async (pageNumber) => {
+            if (scrollToPage(pageNumber)) {
+                return await settleScrollToPage(pageNumber);
+            }
+
+            const superseded = state.scrollRequests.pending;
+            const deferred = new DeferredPromise<PdfScrollResult>();
+            state.scrollRequests.pending = {
+                pageNumber,
+                deferred,
+            };
+            superseded?.deferred.resolve(PdfScrollResult.Superseded);
+
+            const result = await deferred.promise;
+            return result === PdfScrollResult.Scrolled
+                ? await settleScrollToPage(pageNumber)
+                : result;
+        };
+
         const abortController = new AbortController();
         state.hostListeners.current = abortController;
         const listenerOptions = {
@@ -1368,6 +1524,9 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         state.pinchWatchers.isPinching = false;
         state.refreshPageWindow.current = undefined;
         state.applyZoom.current = undefined;
+        state.scrollRequests.scroll = undefined;
+        state.scrollRequests.pending?.deferred.resolve(PdfScrollResult.Dropped);
+        state.scrollRequests.pending = undefined;
         state.toolbarHideDebounce.callback = undefined;
         state.rerenderDebounce.callback = undefined;
         state.hostListeners.current?.abort();
@@ -1408,7 +1567,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             });
             state.pageEntries.clear();
             state.pageSizes.current = undefined;
+            state.renderedContentWidth.current = undefined;
             state.lastPagePromise.current = undefined;
+            /* A queued page number refers to the document being replaced. */
+            state.scrollRequests.pending?.deferred.resolve(PdfScrollResult.Dropped);
+            state.scrollRequests.pending = undefined;
             updateState({
                 lastSourceKey: sourceKey,
                 /*
@@ -1545,10 +1708,6 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 return pdfDocument.getPageSize(index + 1);
             });
         }
-        const wrapperStyle = css`
-            ${cssVars['pdf-vir-zoom-scale'].name}: ${state.zoomScale};
-            ${inputs.stylePassthrough?.['canvas-wrapper'] ?? css``}
-        `;
 
         const pageWindow = state.pageWindow;
         const spacers = computePageSpacerHeights({
@@ -1656,6 +1815,17 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                         const canvasStyle = css`
                             aspect-ratio: ${getPageAspectRatio(state.pageSizes.current?.[index])};
                             ${inputs.stylePassthrough?.canvas ?? css``}
+                        `;
+                        /*
+                         * Not multiplied by the zoom scale: this is what a content-sized ancestor
+                         * measures, so feeding the container's own width in would make a loop.
+                         */
+                        const wrapperStyle = css`
+                            ${cssVars['pdf-vir-zoom-scale'].name}: ${state.zoomScale};
+                            contain-intrinsic-width: ${getPageIntrinsicWidth(
+                                state.pageSizes.current?.[index],
+                            )}px;
+                            ${inputs.stylePassthrough?.['canvas-wrapper'] ?? css``}
                         `;
 
                         return html`
@@ -1889,3 +2059,34 @@ export const PdfVir = defineElement<PdfVirInputs>()({
         `;
     },
 });
+
+/**
+ * Scrolls a {@link PdfVir} element to the given page, mounted or not: the element knows every page's
+ * offset, so it jumps straight there. Called mid-load, the request waits for the load.
+ *
+ * Resolves once the page is mounted, or with the reason it never got there
+ * ({@link PdfScrollResult}). Rejects for a page the document doesn't have. Mounted is not drawn —
+ * for pixels, listen to the element's `canvasLoad` event.
+ *
+ * @category Main
+ */
+export async function scrollPdfToPage({
+    element,
+    pageNumber,
+}: Readonly<{
+    element: (typeof PdfVir)['InstanceType'];
+    pageNumber: number;
+}>) {
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+        throw new Error(`Cannot scroll to page ${pageNumber}: page numbers start at 1.`);
+    }
+
+    const scroll = element.instanceState.scrollRequests.scroll;
+    if (!scroll) {
+        throw new Error(
+            `Cannot scroll to page ${pageNumber}: this <${PdfVir.tagName}> is not in the DOM.`,
+        );
+    }
+
+    return await scroll(pageNumber);
+}
