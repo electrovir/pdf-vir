@@ -48,8 +48,7 @@ import {
     type Point,
 } from './zoom-util.js';
 
-// cspell:word dppx
-// cspell:word rasterizes
+// cspell:words dppx rasterizes
 
 export {type PagePointSize} from './page-layout.js';
 export {loadPdfDocument, PdfDocument} from './pdf-document.js';
@@ -398,7 +397,7 @@ function watchPinchZoom({
         signal: abortController.signal,
     };
 
-    const readPinch = () => {
+    function readPinch() {
         const points = [...pinchWatchers.pointers.values()];
         return check.isLengthAtLeast(points, 2)
             ? measurePinch({
@@ -406,25 +405,25 @@ function watchPinchZoom({
                   second: points[1],
               })
             : undefined;
-    };
+    }
 
     /**
      * `touch-action: pan-x pan-y` stops the browser from pinch-zooming the page, but it still reads
      * a two-finger drag as a scroll — and once it commits to one it sends `pointercancel` and the
      * pinch dies mid-gesture.
      */
-    const refuseTwoFingerScroll = (event: TouchEvent) => {
+    function refuseTwoFingerScroll(event: TouchEvent) {
         if (event.touches.length >= 2) {
             event.preventDefault();
         }
-    };
+    }
 
     /**
      * Re-measures what the pinch is relative to. Called whenever a finger lands or lifts, so that
      * adding or removing a third finger mid-gesture re-bases the zoom where it is instead of
      * jumping to whatever the new finger spacing happens to imply.
      */
-    const resetBaseline = () => {
+    function resetBaseline() {
         const pinch = readPinch();
         pinchWatchers.pending = undefined;
         pinchWatchers.smoothedDistance = pinch?.distance;
@@ -472,9 +471,9 @@ function watchPinchZoom({
         if (wasPinching && !pinch) {
             onPinchEnd();
         }
-    };
+    }
 
-    const applyPending = () => {
+    function applyPending() {
         const pending = pinchWatchers.pending;
         const start = pinchWatchers.start;
         const zoom = applyZoom.current;
@@ -495,7 +494,7 @@ function watchPinchZoom({
                 applyPending();
             },
         });
-    };
+    }
 
     scrollContainer.addEventListener(
         'pointerdown',
@@ -544,11 +543,11 @@ function watchPinchZoom({
         listenerOptions,
     );
 
-    const dropPointer = (event: PointerEvent) => {
+    function dropPointer(event: PointerEvent) {
         if (pinchWatchers.pointers.delete(event.pointerId)) {
             resetBaseline();
         }
-    };
+    }
     scrollContainer.addEventListener('pointerup', dropPointer, listenerOptions);
     /*
      * Fires when the browser takes the gesture over, which it still can despite `touch-action`.
@@ -586,7 +585,7 @@ function watchScrollContainer({
      * Scroll events fire far faster than the page window can meaningfully change, so collapse a
      * burst of them into one measurement per frame.
      */
-    const requestRefresh = () => {
+    function requestRefresh() {
         if (scrollWatchers.pendingFrame != undefined) {
             return;
         }
@@ -594,7 +593,7 @@ function watchScrollContainer({
             scrollWatchers.pendingFrame = undefined;
             refresh();
         });
-    };
+    }
 
     scrollContainer.addEventListener('scroll', requestRefresh, {
         passive: true,
@@ -681,7 +680,7 @@ function watchDevicePixelRatio({
     onChange: () => void;
     signal: AbortSignal;
 }): void {
-    const watchCurrentRatio = () => {
+    function watchCurrentRatio() {
         if (signal.aborted) {
             return;
         }
@@ -698,7 +697,7 @@ function watchDevicePixelRatio({
                     signal,
                 },
             );
-    };
+    }
 
     watchCurrentRatio();
 }
@@ -728,7 +727,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
          */
         'pdf-vir-zoom-scale': '1',
     },
-    styles: ({cssVars}) => {
+    styles({cssVars}) {
         return css`
             :host {
                 background-color: ${
@@ -1114,15 +1113,21 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                         loadedDocument.current = pdfDocument;
                         dispatch(
                             new events.pdfLoad({
-                                pageCount: pdfDocument.pageCount,
-                                pdfDocument,
-                                pdfSource,
+                                detail: {
+                                    pageCount: pdfDocument.pageCount,
+                                    pdfDocument,
+                                    pdfSource,
+                                },
                             }),
                         );
                         return pdfDocument;
                     } catch (caught) {
                         const error = ensureError(caught);
-                        dispatch(new events.pdfError(error));
+                        dispatch(
+                            new events.pdfError({
+                                detail: error,
+                            }),
+                        );
                         throw error;
                     }
                 },
@@ -1139,7 +1144,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             value: false,
         };
 
-        const isPointerInToolbarZone = (event: MouseEvent): boolean => {
+        function isPointerInToolbarZone(event: MouseEvent): boolean {
             const toolbar = host.shadowRoot.querySelector('.zoom-toolbar');
             if (!(toolbar instanceof HTMLElement)) {
                 return false;
@@ -1152,7 +1157,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 rect: toolbar.getBoundingClientRect(),
                 padding: zoomToolbarHoverPaddingPx,
             });
-        };
+        }
 
         state.toolbarHideDebounce.callback = () => {
             /*
@@ -1749,14 +1754,18 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                     watchScrollContainer({
                         scrollContainer,
                         scrollWatchers: state.scrollWatchers,
-                        refresh: () => state.refreshPageWindow.current?.(),
+                        refresh() {
+                            return state.refreshPageWindow.current?.();
+                        },
                     });
                     watchPinchZoom({
                         scrollContainer,
                         pinchWatchers: state.pinchWatchers,
-                        getZoomScale: () => state.zoomScale,
+                        getZoomScale() {
+                            return state.zoomScale;
+                        },
                         applyZoom: state.applyZoom,
-                        onPinchEnd: () => {
+                        onPinchEnd() {
                             /*
                              * Catch up on both things the gesture held off, and redraw right away
                              * rather than waiting out the re-render debounce. That delay exists to
@@ -1837,8 +1846,15 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                 <canvas
                                     ${attributes(inputs.attributePassthrough?.canvas)}
                                     style=${canvasStyle}
-                                    ${onDomCreated((canvas) => {
-                                        assert.instanceOf(canvas, HTMLCanvasElement);
+                                    ${onDomCreated((element) => {
+                                        /*
+                                         * A `const`, because `assert` narrowing on the parameter
+                                         * itself doesn't reach the render callback below.
+                                         */
+                                        const canvas = assertWrap.instanceOf(
+                                            element,
+                                            HTMLCanvasElement,
+                                        );
 
                                         const pageNumber = index + 1;
 
@@ -1849,11 +1865,13 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                          */
                                         dispatch(
                                             new events.canvasCreate({
-                                                canvas,
-                                                pageNumber,
-                                                pageCount: pdfDocument.pageCount,
-                                                pdfSource,
-                                                pdfDocument,
+                                                detail: {
+                                                    canvas,
+                                                    pageNumber,
+                                                    pageCount: pdfDocument.pageCount,
+                                                    pdfSource,
+                                                    pdfDocument,
+                                                },
                                             }),
                                         );
 
@@ -1880,7 +1898,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                          */
                                         let failedRenderCount = 0;
 
-                                        const startRender = async () => {
+                                        async function startRender() {
                                             /*
                                              * Bail when a render is already in flight, when fingers
                                              * are mid-pinch (`onPinchEnd` re-triggers what was held
@@ -1975,22 +1993,28 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                                         epsilon;
                                                 dispatch(
                                                     new events.canvasLoad({
-                                                        canvas,
-                                                        context: result.context,
-                                                        pageNumber,
-                                                        pageCount: pdfDocument.pageCount,
-                                                        pdfSource,
-                                                        pdfDocument,
+                                                        detail: {
+                                                            canvas,
+                                                            context: result.context,
+                                                            pageNumber,
+                                                            pageCount: pdfDocument.pageCount,
+                                                            pdfSource,
+                                                            pdfDocument,
+                                                        },
                                                     }),
                                                 );
                                             } catch (error) {
                                                 failedRenderCount++;
-                                                dispatch(new events.pdfError(ensureError(error)));
+                                                dispatch(
+                                                    new events.pdfError({
+                                                        detail: ensureError(error),
+                                                    }),
+                                                );
                                             } finally {
                                                 isRendering = false;
                                                 pagePromise.resolve();
                                             }
-                                        };
+                                        }
 
                                         /*
                                          * Debounce scroll-through: the first time the page enters the

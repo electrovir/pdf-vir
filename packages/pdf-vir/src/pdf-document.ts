@@ -4,7 +4,7 @@ import {type WrappedPdfiumModule} from '@embedpdf/pdfium';
 import {type PdfSource, type PdfSourceOptions} from './pdf-source.js';
 import {loadPdfium} from './pdfium-loader.js';
 
-// cspell:words bgra, 0xAARRGGBB, fpdf, HEAPU8, SIZEF
+// cspell:words bgra 0xaarrggbb fpdf heapu8 sizef
 
 /** PDFium bitmap format constant for 32-bit BGRA. */
 const bitmapFormatBgra = 4;
