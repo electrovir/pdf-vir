@@ -916,7 +916,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                  * place it on the page.
                  */
                 widthPoints: number;
-                /** This page's intrinsic height in points. See {@link widthPoints}. */
+                /** This page's intrinsic height in points. See `widthPoints`. */
                 heightPoints: number;
                 /**
                  * Bitmap pixels per point that this page was rendered at, which is what `context`
