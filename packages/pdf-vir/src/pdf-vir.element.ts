@@ -910,6 +910,21 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                  */
                 context: CanvasRenderingContext2D;
                 pageNumber: number;
+                /**
+                 * This page's intrinsic width in points, which is the width of `context`'s
+                 * coordinate space. Multiply a normalized (0-1) horizontal coordinate by this to
+                 * place it on the page.
+                 */
+                widthPoints: number;
+                /** This page's intrinsic height in points. See {@link widthPoints}. */
+                heightPoints: number;
+                /**
+                 * Bitmap pixels per point that this page was rendered at, which is what `context`
+                 * is scaled by. Divide a pixel measurement by this to get the point value that
+                 * draws it at that pixel size: a hairline outline that should stay 2 pixels wide at
+                 * every zoom level is `context.lineWidth = 2 / scale`.
+                 */
+                scale: number;
             } & PdfLoadEventDetail
         >(),
         /**
@@ -1997,6 +2012,9 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                                             canvas,
                                                             context: result.context,
                                                             pageNumber,
+                                                            widthPoints: result.widthPoints,
+                                                            heightPoints: result.heightPoints,
+                                                            scale: result.scale,
                                                             pageCount: pdfDocument.pageCount,
                                                             pdfSource,
                                                             pdfDocument,
