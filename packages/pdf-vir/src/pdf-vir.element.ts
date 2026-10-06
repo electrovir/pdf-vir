@@ -19,12 +19,21 @@ import {
     defineElement,
     defineElementEvent,
     html,
+    type HtmlInterpolation,
     ifDefined,
+    nothing,
     onDomCreated,
     repeat,
     unsafeCSS,
 } from 'element-vir';
-import {LoaderAnimated24Icon, lucideIcons, ViraIcon, viraTheme} from 'vira';
+import {
+    LoaderAnimated24Icon,
+    lucideIcons,
+    viraColorPalette,
+    ViraIcon,
+    viraShadows,
+    viraTheme,
+} from 'vira';
 import {
     computePageLayout,
     computePageSpacerHeights,
@@ -106,6 +115,16 @@ export type PdfVirInputs = {
      * @default false
      */
     enableZoomControls: boolean;
+    /**
+     * Renders extra content on top of each mounted page, such as form fields or highlights. The
+     * content is placed in an absolutely positioned layer that exactly covers the page, so
+     * percentage-based positions map straight onto the page. It is rendered inside this element's
+     * shadow DOM, so give it inline styles or use custom elements that bring their own styles.
+     *
+     * Called again on every render and only for pages currently in the DOM: a page scrolled far
+     * enough away is unmounted along with its overlay.
+     */
+    renderPageOverlay: (params: Readonly<PageOverlayParams>) => HtmlInterpolation;
     stylePassthrough: PartialWithUndefined<Record<PdfVirElements, CSSResult>>;
     attributePassthrough: PartialWithUndefined<Record<PdfVirElements, AttributeValues>>;
 }>;
@@ -145,6 +164,16 @@ const pageRenderMarginPx = 500;
  * page PDFium can't draw.
  */
 const maxRenderAttempts = 3;
+/*
+ * All of this sits on top of the PDF pages, which are always light no matter what the rest of the
+ * app is doing, so these come from the raw Vira palette rather than the theme: palette colors are
+ * fixed hues and only the theme's semantic colors flip in dark mode.
+ */
+const errorColor = viraColorPalette['vira-red-650'].value;
+const pageBackgroundColor = viraColorPalette['vira-grey-100'].value;
+const zoomToolbarBackgroundColor = viraColorPalette['vira-grey-950'].value;
+const zoomToolbarForegroundColor = viraColorPalette['vira-grey-100'].value;
+
 /** Vertical space between pages. Shared by the CSS and the scroll-space math, which must agree. */
 const pageGapPx = 32;
 /**
@@ -201,8 +230,21 @@ export type PdfVirElements =
     | 'canvas-wrapper'
     | 'error'
     | 'loader'
+    | 'page-overlay'
     | 'zoom-button'
     | 'zoom-toolbar';
+
+/**
+ * Params for `renderPageOverlay` in {@link PdfVirInputs}.
+ *
+ * @category Internal
+ */
+export type PageOverlayParams = {
+    /** Starts at 1. */
+    pageNumber: number;
+    /** `undefined` when PDFium couldn't measure the page. */
+    pageSize: PagePointSize | undefined;
+};
 
 /**
  * Event detail for the `pdfLoad` event, and also the shared base shape for `canvasCreate` and
@@ -220,7 +262,7 @@ export type PdfLoadEventDetail = {
 /**
  * How a {@link scrollPdfToPage} request ended.
  *
- * @category Main
+ * @category Internal
  */
 export enum PdfScrollResult {
     /** The page list moved and the requested page is mounted. */
@@ -807,6 +849,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 contain: inline-size;
             }
 
+            .page-overlay {
+                position: absolute;
+                inset: 0;
+            }
+
             canvas {
                 width: 100%;
                 height: auto;
@@ -818,11 +865,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 max-height: 100%;
                 box-sizing: border-box;
                 font-weight: bold;
-                color: red;
+                color: ${errorColor};
             }
 
             .loader {
-                background-color: white;
+                background-color: ${pageBackgroundColor};
                 box-sizing: border-box;
                 width: 100%;
                 height: 200px;
@@ -850,11 +897,15 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 align-items: center;
                 gap: 4px;
                 padding: 4px;
-                background-color: rgba(40, 40, 40, 0.85);
+                background-color: color-mix(
+                    in srgb,
+                    ${zoomToolbarBackgroundColor} 85%,
+                    transparent
+                );
                 backdrop-filter: blur(20px) saturate(180%);
                 -webkit-backdrop-filter: blur(20px) saturate(180%);
                 border-radius: 999px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+                ${viraShadows.modal}
                 opacity: 0;
                 pointer-events: none;
                 transition: opacity 200ms ease;
@@ -872,7 +923,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                 background: transparent;
                 border: none;
                 border-radius: 50%;
-                color: white;
+                color: ${zoomToolbarForegroundColor};
                 cursor: pointer;
                 display: flex;
                 align-items: center;
@@ -880,7 +931,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             }
 
             .zoom-button:hover:not(:disabled) {
-                background-color: rgba(255, 255, 255, 0.15);
+                background-color: color-mix(
+                    in srgb,
+                    ${zoomToolbarForegroundColor} 15%,
+                    transparent
+                );
             }
 
             .zoom-button:disabled {
@@ -896,7 +951,11 @@ export const PdfVir = defineElement<PdfVirInputs>()({
             .zoom-divider {
                 width: 1px;
                 height: 22px;
-                background-color: rgba(255, 255, 255, 0.3);
+                background-color: color-mix(
+                    in srgb,
+                    ${zoomToolbarForegroundColor} 30%,
+                    transparent
+                );
             }
         `;
     },
@@ -1620,7 +1679,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                  * disabled at runtime) so a stale `visible` class doesn't linger if it
                  * reactivates later.
                  */
-                isToolbarVisible: isToolbarActive ? state.isToolbarVisible : false,
+                isToolbarVisible: isToolbarActive && state.isToolbarVisible,
             });
         }
 
@@ -2083,6 +2142,24 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                                         state.pageObserver.current?.observe(canvas);
                                     })}
                                 ></canvas>
+                                ${inputs.renderPageOverlay
+                                    ? html`
+                                          <div
+                                              class="page-overlay"
+                                              ${attributes(
+                                                  inputs.attributePassthrough?.['page-overlay'],
+                                              )}
+                                              style=${ifDefined(
+                                                  inputs.stylePassthrough?.['page-overlay'],
+                                              )}
+                                          >
+                                              ${inputs.renderPageOverlay({
+                                                  pageNumber: index + 1,
+                                                  pageSize: state.pageSizes.current?.[index],
+                                              })}
+                                          </div>
+                                      `
+                                    : nothing}
                             </div>
                         `;
                     },

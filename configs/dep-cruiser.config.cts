@@ -11,7 +11,7 @@ const baseConfig = defineConfig({
         },
         'not-to-dev-dep': {
             from: [
-                'vir-demo.element.ts',
+                'src/demo/',
             ],
         },
     },
