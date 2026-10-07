@@ -203,7 +203,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 ${viraShadows.menuShadow}
             }
 
-            ${PdfVir} {
+            ${PdfVir}, ${PdfVirFormFiller} {
                 flex-grow: 1;
                 min-width: 0;
                 /* Drop the viewer's default fixed height so it stretches to this host's height. */
