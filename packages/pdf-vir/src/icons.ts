@@ -79,6 +79,7 @@ export const pdfVirIcons = {
         viraTheme.colors['vira-grey-foreground-placeholder'].foreground.value,
     ),
     loader: LoaderAnimated24Icon,
+    preview: createSizedIcon(lucideIcons.Eye, 16),
     reset: createSizedIcon(lucideIcons.RotateCcw, 16),
     resetZoom: lucideIcons.RotateCcw,
     save: createSizedIcon(lucideIcons.Check, 16),
