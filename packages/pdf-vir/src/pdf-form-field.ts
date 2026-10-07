@@ -202,6 +202,57 @@ export function movePdfFormFieldBox({
 }
 
 /**
+ * Same as {@link movePdfFormFieldBox} but for several boxes at once: every box shifts by the same
+ * amount, which stops as soon as any one of them reaches a page edge, so the boxes keep their
+ * arrangement.
+ *
+ * @category Internal
+ */
+export function movePdfFormFieldBoxes<Box extends Readonly<PdfFormFieldBox>>({
+    boxes,
+    deltaX,
+    deltaY,
+}: Readonly<{
+    boxes: ReadonlyArray<Box>;
+    deltaX: number;
+    deltaY: number;
+}>) {
+    const clampedDeltaX = clamp(deltaX, {
+        min: Math.max(...boxes.map((box) => -box.x)),
+        max: Math.min(...boxes.map((box) => 1 - box.width - box.x)),
+    });
+    const clampedDeltaY = clamp(deltaY, {
+        min: Math.max(...boxes.map((box) => -box.y)),
+        max: Math.min(...boxes.map((box) => 1 - box.height - box.y)),
+    });
+
+    return boxes.map((box) => {
+        return {
+            ...box,
+            x: box.x + clampedDeltaX,
+            y: box.y + clampedDeltaY,
+        };
+    });
+}
+
+/**
+ * The smallest box that contains every given box.
+ *
+ * @category Internal
+ */
+export function getPdfFormFieldBoxBounds(boxes: ReadonlyArray<Readonly<PdfFormFieldBox>>) {
+    const left = Math.min(...boxes.map((box) => box.x));
+    const top = Math.min(...boxes.map((box) => box.y));
+
+    return {
+        x: left,
+        y: top,
+        width: Math.max(...boxes.map((box) => box.x + box.width)) - left,
+        height: Math.max(...boxes.map((box) => box.y + box.height)) - top,
+    };
+}
+
+/**
  * Grows or shrinks a box from its bottom-right corner, keeping its top-left corner in place. The
  * box never extends past the page edges, even if that makes it smaller than the given minimum.
  *

@@ -30,8 +30,11 @@ import {
 import {pdfVirIcons} from './icons.js';
 import {type PagePointSize} from './page-layout.js';
 import {getPdfFormAssigneeColor, type PdfFormAssignee} from './pdf-form-assignee.js';
+import {pdfFormCssVars} from './pdf-form-css-vars.js';
 import {
     createPdfFormField,
+    getPdfFormFieldBoxBounds,
+    movePdfFormFieldBoxes,
     pdfFormFieldConfig,
     PdfFormFieldType,
     type PdfFormField,
@@ -40,7 +43,11 @@ import {
     defaultPdfVirAssigneeListI18n,
     PdfVirAssigneeList,
 } from './pdf-vir-assignee-list.element.js';
-import {defaultPdfVirFormFieldI18n, PdfVirFormField} from './pdf-vir-form-field.element.js';
+import {
+    defaultPdfVirFormFieldI18n,
+    PdfFormFieldSelection,
+    PdfVirFormField,
+} from './pdf-vir-form-field.element.js';
 import {PdfVir, type PdfVirInputs} from './pdf-vir.element.js';
 
 /**
@@ -90,8 +97,10 @@ export type PdfVirFormEditorI18n = typeof defaultPdfVirFormEditorI18n;
 
 /**
  * A form template builder: drag fields from the palette onto the PDF, then move, resize, delete, or
- * mark them required. Alt (Option) dragging a placed field duplicates it, and Delete or Backspace
- * removes the selected field.
+ * mark them required. Shift clicking fields or dragging a box across a page with the mouse selects
+ * several fields at once, which then move, duplicate, delete, and take toolbar changes together.
+ * Alt (Option) dragging a placed field duplicates the selection, and Delete or Backspace removes
+ * it.
  *
  * Controlled: every edit only emits `fieldsChange` or `assigneesChange` with the full new list.
  * Nothing changes on screen until that list is passed back in as `fields` or `assignees`.
@@ -190,7 +199,21 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
     },
     state() {
         return {
-            selectedFieldId: undefined as undefined | string,
+            /** The last id is the field that shows the selection's toolbar. */
+            selectedFieldIds: [] as string[],
+            /** The selection box being dragged across a page, in fractions of that page. */
+            marquee: undefined as
+                | undefined
+                | {
+                      pageNumber: number;
+                      pointerId: number;
+                      startX: number;
+                      startY: number;
+                      endX: number;
+                      endY: number;
+                      /** Kept selected regardless of the box, from a Shift drag. */
+                      baseSelectedFieldIds: string[];
+                  },
             /**
              * Wrapped so that picking "Everyone", an `assigneeId` of `undefined`, differs from
              * picking nothing yet. Falls back to the first assignee while unset or no longer in
@@ -239,6 +262,13 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 assignees.some((assignee) => assignee.id === state.activeAssignee?.assigneeId))
                 ? state.activeAssignee.assigneeId
                 : assignees[0]?.id;
+
+        const selectedFields = inputs.fields.filter((field) => {
+            return state.selectedFieldIds.includes(field.id);
+        });
+        const controlsFieldId = state.selectedFieldIds.findLast((id) => {
+            return selectedFields.some((field) => field.id === id);
+        });
 
         function emitFields(fields: PdfFormField[]) {
             dispatch(
@@ -314,7 +344,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 newField,
             ]);
             updateState({
-                selectedFieldId: newField.id,
+                selectedFieldIds: [newField.id],
             });
         }
 
@@ -398,6 +428,203 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                     clientY: event.clientY,
                 },
             });
+        }
+
+        /**
+         * Applies an edit of one field to the whole selection when that field is part of it: its
+         * move shifts every selected field and its "Required?" and assignee changes are copied to
+         * them, while a resize stays on that field alone.
+         */
+        function applyFieldChange(changedField: Readonly<PdfFormField>) {
+            const previousField = inputs.fields.find((field) => field.id === changedField.id);
+            if (!previousField || !selectedFields.includes(previousField)) {
+                return inputs.fields.map((field) => {
+                    return field.id === changedField.id ? changedField : field;
+                });
+            }
+
+            const sharedChanges: Partial<Pick<PdfFormField, 'isRequired' | 'assigneeId'>> = {
+                ...(changedField.isRequired === previousField.isRequired
+                    ? {}
+                    : {
+                          isRequired: changedField.isRequired,
+                      }),
+                ...(changedField.assigneeId === previousField.assigneeId
+                    ? {}
+                    : {
+                          assigneeId: changedField.assigneeId,
+                      }),
+            };
+            const movedFields = movePdfFormFieldBoxes({
+                boxes: selectedFields.map((field) => {
+                    return field === previousField
+                        ? {
+                              ...changedField,
+                              x: previousField.x,
+                              y: previousField.y,
+                          }
+                        : field;
+                }),
+                deltaX: changedField.x - previousField.x,
+                deltaY: changedField.y - previousField.y,
+            });
+
+            return inputs.fields.map((field) => {
+                const movedField = movedFields.find((moved) => moved.id === field.id);
+                return movedField
+                    ? {
+                          ...movedField,
+                          ...sharedChanges,
+                      }
+                    : field;
+            });
+        }
+
+        function selectField(fieldId: string, selection: PdfFormFieldSelection) {
+            const isSelected = selectedFields.some((field) => field.id === fieldId);
+            const otherIds = state.selectedFieldIds.filter((id) => id !== fieldId);
+
+            const selectionHandlers: Record<PdfFormFieldSelection, () => string[]> = {
+                [PdfFormFieldSelection.Only]() {
+                    return [fieldId];
+                },
+                [PdfFormFieldSelection.Grab]() {
+                    return isSelected
+                        ? [
+                              ...otherIds,
+                              fieldId,
+                          ]
+                        : [fieldId];
+                },
+                [PdfFormFieldSelection.Toggle]() {
+                    return isSelected
+                        ? otherIds
+                        : [
+                              ...otherIds,
+                              fieldId,
+                          ];
+                },
+            };
+
+            updateState({
+                selectedFieldIds: selectionHandlers[selection](),
+            });
+        }
+
+        function deleteSelectedFields() {
+            if (!selectedFields.length) {
+                return;
+            }
+            emitFields(
+                inputs.fields.filter((field) => {
+                    return !selectedFields.includes(field);
+                }),
+            );
+            updateState({
+                selectedFieldIds: [],
+            });
+        }
+
+        function readPagePoint(event: Readonly<PointerEvent>, layer: Readonly<HTMLElement>) {
+            const rect = layer.getBoundingClientRect();
+            return {
+                x: (event.clientX - rect.left) / rect.width,
+                y: (event.clientY - rect.top) / rect.height,
+            };
+        }
+
+        function updateMarquee(event: Readonly<PointerEvent>, layer: Readonly<HTMLElement>) {
+            const marquee = state.marquee;
+            if (marquee?.pointerId !== event.pointerId) {
+                return;
+            }
+            const end = readPagePoint(event, layer);
+            const left = Math.min(marquee.startX, end.x);
+            const right = Math.max(marquee.startX, end.x);
+            const top = Math.min(marquee.startY, end.y);
+            const bottom = Math.max(marquee.startY, end.y);
+
+            const touchedIds = inputs.fields
+                .filter((field) => {
+                    return (
+                        field.pageNumber === marquee.pageNumber &&
+                        field.x < right &&
+                        field.x + field.width > left &&
+                        field.y < bottom &&
+                        field.y + field.height > top
+                    );
+                })
+                .map((field) => field.id);
+
+            updateState({
+                marquee: {
+                    ...marquee,
+                    endX: end.x,
+                    endY: end.y,
+                },
+                selectedFieldIds: [
+                    ...marquee.baseSelectedFieldIds.filter((id) => !touchedIds.includes(id)),
+                    ...touchedIds,
+                ],
+            });
+        }
+
+        /** Only exists while several fields are selected, so a lone field keeps its own border. */
+        function getSelectionBox(pageNumber: number) {
+            const pageFields = selectedFields.filter((field) => field.pageNumber === pageNumber);
+            return selectedFields.length > 1 && pageFields.length
+                ? getPdfFormFieldBoxBounds(pageFields)
+                : undefined;
+        }
+
+        function renderSelectionBorder(pageNumber: number) {
+            const selectionBox = getSelectionBox(pageNumber);
+            if (!selectionBox) {
+                return nothing;
+            }
+
+            return html`
+                <div
+                    style=${css`
+                        position: absolute;
+                        z-index: 1;
+                        left: ${selectionBox.x * 100}%;
+                        top: ${selectionBox.y * 100}%;
+                        width: ${selectionBox.width * 100}%;
+                        height: ${selectionBox.height * 100}%;
+                        outline: 2px dotted ${pdfFormCssVars['pdf-vir-field-accent-color'].value};
+                        outline-offset: 4px;
+                        pointer-events: none;
+                    `}
+                ></div>
+            `;
+        }
+
+        function renderMarquee(pageNumber: number) {
+            const marquee = state.marquee;
+            if (marquee?.pageNumber !== pageNumber) {
+                return nothing;
+            }
+
+            return html`
+                <div
+                    style=${css`
+                        position: absolute;
+                        left: ${Math.min(marquee.startX, marquee.endX) * 100}%;
+                        top: ${Math.min(marquee.startY, marquee.endY) * 100}%;
+                        width: ${Math.abs(marquee.endX - marquee.startX) * 100}%;
+                        height: ${Math.abs(marquee.endY - marquee.startY) * 100}%;
+                        box-sizing: border-box;
+                        border: 1px solid ${pdfFormCssVars['pdf-vir-field-accent-color'].value};
+                        background-color: color-mix(
+                            in srgb,
+                            ${pdfFormCssVars['pdf-vir-field-accent-color'].value} 12%,
+                            transparent
+                        );
+                        pointer-events: none;
+                    `}
+                ></div>
+            `;
         }
 
         function renderPaletteBlock(type: PdfFormFieldType) {
@@ -567,9 +794,12 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                     state.pageSizes.current[pageNumber] = pageSize;
                     return html`
                         <div
+                            tabindex="-1"
                             style=${css`
                                 position: absolute;
                                 inset: 0;
+                                outline: none;
+                                ${noUserSelect}
                             `}
                             ${onDomCreated((element) => {
                                 state.pageLayers.current[pageNumber] = assertWrap.instanceOf(
@@ -577,10 +807,62 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                                     HTMLElement,
                                 );
                             })}
-                            ${listen('click', () => {
+                            ${listen('pointerdown', (event) => {
+                                /* Touch presses are left alone so they can still scroll and pinch. */
+                                if (event.button !== 0 || event.pointerType === 'touch') {
+                                    return;
+                                }
+                                const layer = assertWrap.instanceOf(
+                                    event.currentTarget,
+                                    HTMLElement,
+                                );
+                                layer.setPointerCapture(event.pointerId);
+                                const start = readPagePoint(event, layer);
+                                const baseSelectedFieldIds = event.shiftKey
+                                    ? state.selectedFieldIds
+                                    : [];
                                 updateState({
-                                    selectedFieldId: undefined,
+                                    marquee: {
+                                        pageNumber,
+                                        pointerId: event.pointerId,
+                                        startX: start.x,
+                                        startY: start.y,
+                                        endX: start.x,
+                                        endY: start.y,
+                                        baseSelectedFieldIds,
+                                    },
+                                    selectedFieldIds: baseSelectedFieldIds,
                                 });
+                            })}
+                            ${listen('pointermove', (event) => {
+                                updateMarquee(
+                                    event,
+                                    assertWrap.instanceOf(event.currentTarget, HTMLElement),
+                                );
+                            })}
+                            ${listen('pointerup', (event) => {
+                                if (state.marquee?.pointerId === event.pointerId) {
+                                    updateState({
+                                        marquee: undefined,
+                                    });
+                                }
+                            })}
+                            ${listen('pointercancel', (event) => {
+                                if (state.marquee?.pointerId === event.pointerId) {
+                                    updateState({
+                                        marquee: undefined,
+                                    });
+                                }
+                            })}
+                            ${listen('keydown', (event) => {
+                                /* Keys pressed on a field are handled by its `fieldDelete`. */
+                                if (
+                                    event.target === event.currentTarget &&
+                                    (event.key === 'Delete' || event.key === 'Backspace')
+                                ) {
+                                    event.preventDefault();
+                                    deleteSelectedFields();
+                                }
                             })}
                         >
                             ${repeat(
@@ -592,59 +874,53 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                                     return html`
                                         <${PdfVirFormField.assign({
                                             field,
-                                            isSelected: field.id === state.selectedFieldId,
+                                            isSelected: selectedFields.includes(field),
+                                            showControls: field.id === controlsFieldId,
+                                            selectionBox:
+                                                field.id === controlsFieldId
+                                                    ? getSelectionBox(pageNumber)
+                                                    : undefined,
                                             assignees,
                                             i18n,
                                         })}
                                             ${listen(
                                                 PdfVirFormField.events.fieldChange,
                                                 (event) => {
-                                                    emitFields(
-                                                        inputs.fields.map((existingField) => {
-                                                            return existingField.id ===
-                                                                event.detail.id
-                                                                ? event.detail
-                                                                : existingField;
-                                                        }),
-                                                    );
+                                                    emitFields(applyFieldChange(event.detail));
                                                 },
                                             )}
                                             ${listen(
                                                 PdfVirFormField.events.fieldDuplicate,
                                                 (event) => {
+                                                    const originals = selectedFields.includes(field)
+                                                        ? selectedFields
+                                                        : [field];
                                                     emitFields([
-                                                        ...inputs.fields.map((existingField) => {
-                                                            return existingField.id ===
-                                                                event.detail.id
-                                                                ? event.detail
-                                                                : existingField;
+                                                        ...applyFieldChange(event.detail),
+                                                        ...originals.map((original) => {
+                                                            return {
+                                                                ...original,
+                                                                id: randomString(),
+                                                            };
                                                         }),
-                                                        {
-                                                            ...field,
-                                                            id: randomString(),
-                                                        },
                                                     ]);
                                                 },
                                             )}
-                                            ${listen(PdfVirFormField.events.fieldSelect, () => {
-                                                updateState({
-                                                    selectedFieldId: field.id,
-                                                });
-                                            })}
-                                            ${listen(PdfVirFormField.events.fieldDelete, () => {
-                                                emitFields(
-                                                    inputs.fields.filter((existingField) => {
-                                                        return existingField.id !== field.id;
-                                                    }),
-                                                );
-                                                updateState({
-                                                    selectedFieldId: undefined,
-                                                });
-                                            })}
+                                            ${listen(
+                                                PdfVirFormField.events.fieldSelect,
+                                                (event) => {
+                                                    selectField(field.id, event.detail);
+                                                },
+                                            )}
+                                            ${listen(
+                                                PdfVirFormField.events.fieldDelete,
+                                                deleteSelectedFields,
+                                            )}
                                         ></${PdfVirFormField}>
                                     `;
                                 },
                             )}
+                            ${renderSelectionBorder(pageNumber)} ${renderMarquee(pageNumber)}
                         </div>
                     `;
                 },
@@ -682,7 +958,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                         ${listen('click', () => {
                             emitFields([]);
                             updateState({
-                                selectedFieldId: undefined,
+                                selectedFieldIds: [],
                                 isClearConfirmationOpen: false,
                             });
                         })}
@@ -696,22 +972,25 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
         state.outsideClickListener.current = abortController;
         /**
          * Listens on the window so that a press anywhere on the page, even outside this element,
-         * deselects. Fields select themselves, so presses on any field are left alone.
+         * deselects. Fields and page layers manage the selection themselves, so presses on them are
+         * left alone.
          */
         window.addEventListener(
             'pointerdown',
             (event) => {
+                const pageLayers = getObjectTypedValues(state.pageLayers.current);
                 if (
-                    state.selectedFieldId &&
+                    state.selectedFieldIds.length &&
                     !event.composedPath().some((target) => {
                         return (
                             target instanceof HTMLElement &&
-                            target.tagName === PdfVirFormField.tagName.toUpperCase()
+                            (target.tagName === PdfVirFormField.tagName.toUpperCase() ||
+                                pageLayers.includes(target))
                         );
                     })
                 ) {
                     updateState({
-                        selectedFieldId: undefined,
+                        selectedFieldIds: [],
                     });
                 }
             },

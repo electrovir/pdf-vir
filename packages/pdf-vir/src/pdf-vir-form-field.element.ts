@@ -49,6 +49,24 @@ export enum PdfFormFieldGesture {
     Resize = 'resize',
 }
 
+/**
+ * How a press on a {@link PdfVirFormField} changes which fields are selected, as the detail of its
+ * `fieldSelect` event.
+ *
+ * @category Internal
+ */
+export enum PdfFormFieldSelection {
+    /** Select only this field. */
+    Only = 'only',
+    /**
+     * Keep the current selection if it includes this field, so that a drag moves all of it, and
+     * otherwise select only this field. Either way this field gets the selection's controls.
+     */
+    Grab = 'grab',
+    /** Add this field to the selection, or remove it if it is already selected. */
+    Toggle = 'toggle',
+}
+
 /** The smallest a field can be resized to, in CSS pixels at the current zoom. */
 const minFieldSizePx = 12;
 
@@ -101,6 +119,16 @@ export const PdfVirFormField = defineElement<
         field: Readonly<PdfFormField>;
         isSelected: boolean;
     } & PartialWithUndefined<{
+        /**
+         * Shows the toolbar and resize handle. Only one field of a multi-field selection shows
+         * them.
+         */
+        showControls: boolean;
+        /**
+         * The box around every selected field on this field's page, when several fields are
+         * selected. The toolbar is placed against it instead of against this field.
+         */
+        selectionBox: Readonly<PdfFormFieldBox>;
         /**
          * Colors the field by its assignee and adds an assignee dropdown to its toolbar. Omit or
          * leave empty to draw every field in the default colors with no dropdown.
@@ -227,6 +255,22 @@ export const PdfVirFormField = defineElement<
                     position-area: bottom span-right;
                     margin: 6px 0 0;
                 }
+
+                &.on-selection {
+                    position-anchor: --pdf-vir-form-selection;
+                    /* Clears the selection border that the editor draws outside the box. */
+                    margin: 0 0 10px;
+
+                    &.below {
+                        margin: 10px 0 0;
+                    }
+                }
+            }
+
+            .selection-anchor {
+                position: absolute;
+                anchor-name: --pdf-vir-form-selection;
+                pointer-events: none;
             }
 
             .resize-handle {
@@ -244,7 +288,8 @@ export const PdfVirFormField = defineElement<
     },
     events: {
         fieldChange: defineElementEvent<PdfFormField>(),
-        fieldSelect: defineElementEvent<void>(),
+        fieldSelect: defineElementEvent<PdfFormFieldSelection>(),
+        /** Delete or Backspace was pressed on the field, or its toolbar's delete button was clicked. */
         fieldDelete: defineElementEvent<void>(),
         /**
          * Emitted in place of `fieldChange` on the first move of an Alt (Option) drag. The detail
@@ -271,6 +316,7 @@ export const PdfVirFormField = defineElement<
                           pageWidthPx: number;
                           pageHeightPx: number;
                           isDuplicating: boolean;
+                          hasMoved: boolean;
                       },
             },
         };
@@ -319,13 +365,18 @@ export const PdfVirFormField = defineElement<
             /* Keeps the resize handle's press from also starting a move. */
             event.stopPropagation();
 
+            if (event.shiftKey && type === PdfFormFieldGesture.Move) {
+                dispatch(
+                    new events.fieldSelect({
+                        detail: PdfFormFieldSelection.Toggle,
+                    }),
+                );
+                return;
+            }
+
             const pageRect = assertWrap.isDefined(host.parentElement).getBoundingClientRect();
             const target = assertWrap.instanceOf(event.currentTarget, Element);
             target.setPointerCapture(event.pointerId);
-            /* Canceling the press above also cancels the focus that Delete and Backspace need. */
-            assertWrap.instanceOf(target.closest('.field'), HTMLElement).focus({
-                preventScroll: true,
-            });
             state.gesture.current = {
                 type,
                 pointerId: event.pointerId,
@@ -340,15 +391,22 @@ export const PdfVirFormField = defineElement<
                 pageWidthPx: pageRect.width,
                 pageHeightPx: pageRect.height,
                 isDuplicating: type === PdfFormFieldGesture.Move && event.altKey,
+                hasMoved: false,
             };
+            /*
+             * Canceling the press above also cancels the focus that Delete and Backspace need. This
+             * comes after the gesture is stored so that the focus listener leaves the selection to
+             * the `Grab` below.
+             */
+            assertWrap.instanceOf(target.closest('.field'), HTMLElement).focus({
+                preventScroll: true,
+            });
 
-            if (!inputs.isSelected) {
-                dispatch(
-                    new events.fieldSelect({
-                        detail: undefined,
-                    }),
-                );
-            }
+            dispatch(
+                new events.fieldSelect({
+                    detail: PdfFormFieldSelection.Grab,
+                }),
+            );
         }
 
         function updateGesture(event: PointerEvent) {
@@ -358,6 +416,10 @@ export const PdfVirFormField = defineElement<
             }
             const deltaX = (event.clientX - gesture.startX) / gesture.pageWidthPx;
             const deltaY = (event.clientY - gesture.startY) / gesture.pageHeightPx;
+            if (!deltaX && !deltaY) {
+                return;
+            }
+            gesture.hasMoved = true;
 
             const gestureHandlers: Record<PdfFormFieldGesture, () => PdfFormFieldBox> = {
                 [PdfFormFieldGesture.Move]() {
@@ -400,8 +462,22 @@ export const PdfVirFormField = defineElement<
         }
 
         function endGesture(event: PointerEvent) {
-            if (state.gesture.current?.pointerId === event.pointerId) {
-                state.gesture.current = undefined;
+            const gesture = state.gesture.current;
+            if (gesture?.pointerId !== event.pointerId) {
+                return;
+            }
+            state.gesture.current = undefined;
+            /* A plain click on one field of a multi-field selection narrows the selection to it. */
+            if (
+                event.type === 'pointerup' &&
+                gesture.type === PdfFormFieldGesture.Move &&
+                !gesture.hasMoved
+            ) {
+                dispatch(
+                    new events.fieldSelect({
+                        detail: PdfFormFieldSelection.Only,
+                    }),
+                );
             }
         }
 
@@ -433,10 +509,10 @@ export const PdfVirFormField = defineElement<
                 class="field"
                 tabindex="0"
                 ${listen('focus', () => {
-                    if (!inputs.isSelected) {
+                    if (!inputs.isSelected && !state.gesture.current) {
                         dispatch(
                             new events.fieldSelect({
-                                detail: undefined,
+                                detail: PdfFormFieldSelection.Only,
                             }),
                         );
                     }
@@ -468,10 +544,6 @@ export const PdfVirFormField = defineElement<
                 })}
                 ${listen('pointerup', endGesture)}
                 ${listen('pointercancel', endGesture)}
-                ${listen('click', (event) => {
-                    /* Clicks on the page around the field deselect it; clicks on the field must not. */
-                    event.stopPropagation();
-                })}
             >
                 <div class="icon-wrapper" title=${i18n.fieldTypeLabels[inputs.field.type]}>
                     <${ViraIcon.assign({
@@ -484,12 +556,13 @@ export const PdfVirFormField = defineElement<
                           `
                         : nothing}
                 </div>
-                ${inputs.isSelected
+                ${inputs.isSelected && inputs.showControls
                     ? html`
                           <div
-                              class="toolbar ${inputs.field.y < toolbarFlipThreshold
+                              class="toolbar ${(inputs.selectionBox || inputs.field).y <
+                              toolbarFlipThreshold
                                   ? 'below'
-                                  : ''}"
+                                  : ''} ${inputs.selectionBox ? 'on-selection' : ''}"
                               popover="manual"
                               ${onDomCreated((element) => {
                                   assertWrap.instanceOf(element, HTMLElement).showPopover();
@@ -583,6 +656,27 @@ export const PdfVirFormField = defineElement<
                                   })}
                               ></${ViraCheckbox}>
                           </div>
+                          ${inputs.selectionBox
+                              ? html`
+                                    <div
+                                        class="selection-anchor"
+                                        style=${css`
+                                            left: ${((inputs.selectionBox.x - inputs.field.x) /
+                                                inputs.field.width) *
+                                            100}%;
+                                            top: ${((inputs.selectionBox.y - inputs.field.y) /
+                                                inputs.field.height) *
+                                            100}%;
+                                            width: ${(inputs.selectionBox.width /
+                                                inputs.field.width) *
+                                            100}%;
+                                            height: ${(inputs.selectionBox.height /
+                                                inputs.field.height) *
+                                            100}%;
+                                        `}
+                                    ></div>
+                                `
+                              : nothing}
                           <div
                               class="resize-handle"
                               ${listen('pointerdown', (event) => {

@@ -3,7 +3,9 @@ import {omitObjectKeys} from '@augment-vir/common';
 import {describe, it, itCases} from '@augment-vir/test';
 import {
     createPdfFormField,
+    getPdfFormFieldBoxBounds,
     movePdfFormFieldBox,
+    movePdfFormFieldBoxes,
     PdfFormFieldType,
     resizePdfFormFieldBox,
 } from './pdf-form-field.js';
@@ -41,6 +43,84 @@ describe(movePdfFormFieldBox.name, () => {
                 ...baseBox,
                 x: 0.75,
                 y: 0,
+            },
+        },
+    ]);
+});
+
+describe(movePdfFormFieldBoxes.name, () => {
+    itCases(movePdfFormFieldBoxes, [
+        {
+            it: 'moves every box by the same amount',
+            input: {
+                boxes: [
+                    baseBox,
+                    {
+                        ...baseBox,
+                        x: 0.5,
+                    },
+                ],
+                deltaX: 0.25,
+                deltaY: 0,
+            },
+            expect: [
+                {
+                    ...baseBox,
+                    x: 0.45,
+                },
+                {
+                    ...baseBox,
+                    x: 0.75,
+                },
+            ],
+        },
+        {
+            it: 'stops every box once one reaches a page edge',
+            input: {
+                boxes: [
+                    baseBox,
+                    {
+                        ...baseBox,
+                        x: 0.5,
+                    },
+                ],
+                deltaX: 0.5,
+                deltaY: -0.5,
+            },
+            expect: [
+                {
+                    ...baseBox,
+                    x: 0.45,
+                    y: 0,
+                },
+                {
+                    ...baseBox,
+                    x: 0.75,
+                    y: 0,
+                },
+            ],
+        },
+    ]);
+});
+
+describe(getPdfFormFieldBoxBounds.name, () => {
+    itCases(getPdfFormFieldBoxBounds, [
+        {
+            it: 'spans every box',
+            input: [
+                baseBox,
+                {
+                    x: 0.5,
+                    y: 0.125,
+                    width: 0.25,
+                    height: 0.5,
+                },
+            ],
+            expect: {
+                x: 0.2,
+                y: 0.125,
+                width: 0.55,
+                height: 0.5,
             },
         },
     ]);
