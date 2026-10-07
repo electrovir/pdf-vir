@@ -1,5 +1,6 @@
-import {type Values} from '@augment-vir/common';
+import {type PartialWithUndefined, type Values} from '@augment-vir/common';
 import {defineShape, recordShape, unionShape} from 'object-shape-tester';
+import {canPdfFormAssigneeFill} from './pdf-form-assignee.js';
 import {pdfFormFieldConfig, type PdfFormField} from './pdf-form-field.js';
 
 /**
@@ -49,20 +50,30 @@ export function isPdfFormFieldFilled({
 
 /**
  * Finds every required field that {@link isPdfFormFieldFilled} says is not filled, in the order the
- * fields were given.
+ * fields were given. With an `assigneeId`, only the fields that assignee can fill are checked:
+ * their own and those assigned to no one.
  *
  * @category Internal
  */
 export function findUnfilledRequiredPdfFormFields<const Field extends Readonly<PdfFormField>>({
     fields,
     values,
-}: Readonly<{
-    fields: ReadonlyArray<Field>;
-    values: Readonly<PdfFormValues>;
-}>) {
+    assigneeId,
+}: Readonly<
+    {
+        fields: ReadonlyArray<Field>;
+        values: Readonly<PdfFormValues>;
+    } & PartialWithUndefined<{
+        assigneeId: string;
+    }>
+>) {
     return fields.filter((field) => {
         return (
             field.isRequired &&
+            canPdfFormAssigneeFill({
+                field,
+                assigneeId,
+            }) &&
             !isPdfFormFieldFilled({
                 field,
                 values,
@@ -72,15 +83,20 @@ export function findUnfilledRequiredPdfFormFields<const Field extends Readonly<P
 }
 
 /**
- * Checks if every required field is filled. Optional fields are ignored.
+ * Checks if every required field is filled. Optional fields are ignored. With an `assigneeId`, only
+ * the fields that assignee can fill are checked.
  *
  * @category Internal
  */
 export function areRequiredPdfFormFieldsFilled(
-    params: Readonly<{
-        fields: ReadonlyArray<Readonly<PdfFormField>>;
-        values: Readonly<PdfFormValues>;
-    }>,
+    params: Readonly<
+        {
+            fields: ReadonlyArray<Readonly<PdfFormField>>;
+            values: Readonly<PdfFormValues>;
+        } & PartialWithUndefined<{
+            assigneeId: string;
+        }>
+    >,
 ) {
     return !findUnfilledRequiredPdfFormFields(params).length;
 }

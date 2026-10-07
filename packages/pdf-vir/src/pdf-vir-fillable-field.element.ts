@@ -13,14 +13,10 @@ import {
     nothing,
     type HtmlInterpolation,
 } from 'element-vir';
-import {lucideIcons, noUserSelect, ViraIcon} from 'vira';
+import {noUserSelect, ViraIcon} from 'vira';
+import {circleMarkPath, pdfVirIcons} from './icons.js';
 import {pdfFormCssVars} from './pdf-form-css-vars.js';
-import {
-    circleMarkPath,
-    pdfFormFieldConfig,
-    PdfFormFieldType,
-    type PdfFormField,
-} from './pdf-form-field.js';
+import {pdfFormFieldConfig, PdfFormFieldType, type PdfFormField} from './pdf-form-field.js';
 import {
     isPdfFormFieldFilled,
     type PdfFormFieldValue,
@@ -50,6 +46,16 @@ function measureSignatureWidthRatio(text: string, host: Readonly<HTMLElement>) {
             .trim() || pdfFormCssVars['pdf-vir-signature-font-family'].default;
     context.font = `${signatureMeasureFontSizePx}px ${fontFamily}`;
     return context.measureText(text).width / signatureMeasureFontSizePx || 1;
+}
+
+function isMissingValue(
+    inputs: Readonly<{
+        field: Readonly<PdfFormField>;
+        values: Readonly<PdfFormValues>;
+        isReadOnly?: boolean | undefined;
+    }>,
+) {
+    return !inputs.isReadOnly && inputs.field.isRequired && !isPdfFormFieldFilled(inputs);
 }
 
 /**
@@ -89,16 +95,24 @@ export const PdfVirFillableField = defineElement<
         field: Readonly<PdfFormField>;
         values: Readonly<PdfFormValues>;
     } & PartialWithUndefined<{
+        /** Shows the field's value without letting it be changed or focused. */
+        isReadOnly: boolean;
         i18n: Readonly<PartialWithUndefined<PdfVirFillableFieldI18n>>;
     }>
 >()({
     tagName: 'pdf-vir-fillable-field',
+    cssVars: {
+        'pdf-vir-fillable-field-signature-width-ratio': 1,
+    },
     hostClasses: {
         'pdf-vir-fillable-field-missing'({inputs}) {
-            return inputs.field.isRequired && !isPdfFormFieldFilled(inputs);
+            return isMissingValue(inputs);
+        },
+        'pdf-vir-fillable-field-read-only'({inputs}) {
+            return !!inputs.isReadOnly;
         },
     },
-    styles({hostClasses}) {
+    styles({hostClasses, cssVars}) {
         return css`
             :host {
                 position: absolute;
@@ -132,6 +146,12 @@ export const PdfVirFillableField = defineElement<
 
             ${hostClasses['pdf-vir-fillable-field-missing'].selector} {
                 border: 1px dashed ${pdfFormCssVars['pdf-vir-red-accent-color'].value};
+            }
+
+            ${hostClasses['pdf-vir-fillable-field-read-only'].selector} {
+                border-color: ${pdfFormCssVars['pdf-vir-page-border-color'].value};
+                background-color: transparent;
+                color: ${pdfFormCssVars['pdf-vir-page-border-color'].value};
             }
 
             .required-marker {
@@ -204,7 +224,10 @@ export const PdfVirFillableField = defineElement<
                 color: ${pdfFormCssVars['pdf-vir-page-text-color'].value};
                 font-family: ${pdfFormCssVars['pdf-vir-signature-font-family'].value};
                 /* Shrinks long text to fit the field's width instead of clipping it. */
-                font-size: min(75cqh, calc(90cqw / var(--pdf-vir-signature-width-ratio, 1)));
+                font-size: min(
+                    75cqh,
+                    calc(90cqw / ${cssVars['pdf-vir-fillable-field-signature-width-ratio'].value})
+                );
                 white-space: nowrap;
             }
 
@@ -236,7 +259,7 @@ export const PdfVirFillableField = defineElement<
         valueChange: defineElementEvent<PdfFormFieldValue>(),
         stampRequest: defineElementEvent<void>(),
     },
-    render({inputs, host, dispatch, events}) {
+    render({inputs, host, dispatch, events, cssVars}) {
         const i18n = mergeDefinedProperties(defaultPdfVirFillableFieldI18n, inputs.i18n);
         const value = inputs.values[inputs.field.id];
 
@@ -266,10 +289,8 @@ export const PdfVirFillableField = defineElement<
                               <span
                                   class="signature-text"
                                   style=${css`
-                                      --pdf-vir-signature-width-ratio: ${measureSignatureWidthRatio(
-                                          value,
-                                          host,
-                                      )};
+                                      ${cssVars['pdf-vir-fillable-field-signature-width-ratio']
+                                          .name}: ${measureSignatureWidthRatio(value, host)};
                                   `}
                               >
                                   ${value}
@@ -318,7 +339,7 @@ export const PdfVirFillableField = defineElement<
                             ${value === true
                                 ? html`
                                       <${ViraIcon.assign({
-                                          icon: lucideIcons.Check,
+                                          icon: pdfVirIcons.check,
                                           fitContainer: true,
                                       })}></${ViraIcon}>
                                   `
@@ -369,10 +390,11 @@ export const PdfVirFillableField = defineElement<
         host.style.top = `${inputs.field.y * 100}%`;
         host.style.width = `${inputs.field.width * 100}%`;
         host.style.height = `${inputs.field.height * 100}%`;
+        host.inert = !!inputs.isReadOnly;
 
         return html`
             ${fieldTemplates[inputs.field.type]()}
-            ${inputs.field.isRequired && !isPdfFormFieldFilled(inputs)
+            ${isMissingValue(inputs)
                 ? html`
                       <span class="required-marker">*</span>
                   `

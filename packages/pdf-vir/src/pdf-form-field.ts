@@ -1,8 +1,8 @@
 import {check} from '@augment-vir/assert';
-import {clamp, randomString} from '@augment-vir/common';
-import {html} from 'element-vir';
-import {defineShape, enumShape} from 'object-shape-tester';
-import {defineIcon, lucideIcons, viraIconCssVars, type ViraIconSvg} from 'vira';
+import {clamp, randomString, type PartialWithUndefined} from '@augment-vir/common';
+import {defineShape, enumShape, nullableShape} from 'object-shape-tester';
+import {type ViraIconSvg} from 'vira';
+import {pdfVirIcons} from './icons.js';
 import {getPageAspectRatio, getPageIntrinsicWidth, type PagePointSize} from './page-layout.js';
 import {getSignerInitials, normalizeSignerName} from './pdf-form-signature.js';
 import type {PdfFormFieldValue} from './pdf-form-value.js';
@@ -57,6 +57,8 @@ export const pdfFormFieldShape = defineShape({
     /** Starts at 1. */
     pageNumber: 0,
     isRequired: false,
+    /** The `PdfFormAssignee.id` of who fills this field. Anyone can fill a field without one. */
+    assigneeId: nullableShape(''),
 });
 
 /**
@@ -69,36 +71,6 @@ export type PdfFormField = typeof pdfFormFieldShape.runtimeType;
 function isNonBlankString(this: void, value: PdfFormFieldValue | undefined) {
     return check.isString(value) && !!value.trim();
 }
-
-/**
- * The hand-drawn loop that marks a circled {@link PdfFormFieldType.CircleOne} field, in a 100 by 100
- * `viewBox`. Draw it with `preserveAspectRatio="none"` and `vector-effect="non-scaling-stroke"` so
- * it stretches to any field shape without warping the pen width.
- *
- * @category Internal
- */
-export const circleMarkPath =
-    'M 66 14 C 30 8, 5 22, 5 52 C 5 80, 36 95, 62 94 C 88 92, 96 70, 95 46 C 94 20, 72 4, 34 5';
-
-const circleMarkIcon = defineIcon({
-    name: 'CircleMark',
-    /* The `viewBox` is taller than the path so the loop draws as a wide oval, like a circled word. */
-    svgTemplate: html`
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="-2 -40 104 180"
-            preserveAspectRatio="none"
-            fill="none"
-            stroke=${viraIconCssVars['vira-icon-stroke-color'].value}
-            stroke-width=${viraIconCssVars['vira-icon-stroke-width'].value}
-            stroke-linecap="round"
-        >
-            <path vector-effect="non-scaling-stroke" d=${circleMarkPath}></path>
-        </svg>
-    `,
-});
 
 /**
  * Everything that varies between {@link PdfFormFieldType}s: how a field is drawn, how big it starts
@@ -131,7 +103,7 @@ export const pdfFormFieldConfig: Readonly<
 > = {
     [PdfFormFieldType.Checkbox]: {
         label: 'Checkbox',
-        icon: lucideIcons.SquareCheck,
+        icon: pdfVirIcons.squareCheck,
         defaultSize: {
             widthPoints: 18,
             heightPoints: 18,
@@ -144,7 +116,7 @@ export const pdfFormFieldConfig: Readonly<
     },
     [PdfFormFieldType.Text]: {
         label: 'Text',
-        icon: lucideIcons.TextCursorInput,
+        icon: pdfVirIcons.textCursorInput,
         defaultSize: {
             widthPoints: 150,
             heightPoints: 22,
@@ -155,7 +127,7 @@ export const pdfFormFieldConfig: Readonly<
     },
     [PdfFormFieldType.Date]: {
         label: 'Date',
-        icon: lucideIcons.Calendar,
+        icon: pdfVirIcons.calendar,
         defaultSize: {
             widthPoints: 90,
             heightPoints: 22,
@@ -166,7 +138,7 @@ export const pdfFormFieldConfig: Readonly<
     },
     [PdfFormFieldType.CircleOne]: {
         label: 'Circle One',
-        icon: circleMarkIcon,
+        icon: pdfVirIcons.circleMark,
         defaultSize: {
             widthPoints: 50,
             heightPoints: 24,
@@ -179,7 +151,7 @@ export const pdfFormFieldConfig: Readonly<
     },
     [PdfFormFieldType.Signature]: {
         label: 'Signature',
-        icon: lucideIcons.Signature,
+        icon: pdfVirIcons.signature,
         defaultSize: {
             widthPoints: 160,
             heightPoints: 40,
@@ -190,7 +162,7 @@ export const pdfFormFieldConfig: Readonly<
     },
     [PdfFormFieldType.Initials]: {
         label: 'Initials',
-        icon: lucideIcons.CaseUpper,
+        icon: pdfVirIcons.caseUpper,
         defaultSize: {
             widthPoints: 60,
             heightPoints: 30,
@@ -273,14 +245,19 @@ export function createPdfFormField({
     pageSize,
     centerX,
     centerY,
-}: Readonly<{
-    type: PdfFormFieldType;
-    pageNumber: number;
-    /** `undefined` falls back to US letter. */
-    pageSize: Readonly<PagePointSize> | undefined;
-    centerX: number;
-    centerY: number;
-}>) {
+    assigneeId,
+}: Readonly<
+    {
+        type: PdfFormFieldType;
+        pageNumber: number;
+        /** `undefined` falls back to US letter. */
+        pageSize: Readonly<PagePointSize> | undefined;
+        centerX: number;
+        centerY: number;
+    } & PartialWithUndefined<{
+        assigneeId: string;
+    }>
+>) {
     const pageWidthPoints = getPageIntrinsicWidth(pageSize);
     const pageHeightPoints = pageWidthPoints / getPageAspectRatio(pageSize);
     const width = Math.min(pdfFormFieldConfig[type].defaultSize.widthPoints / pageWidthPoints, 1);
@@ -294,6 +271,11 @@ export function createPdfFormField({
         type,
         pageNumber,
         isRequired: pdfFormFieldConfig[type].requiredByDefault,
+        ...(assigneeId
+            ? {
+                  assigneeId,
+              }
+            : {}),
         ...movePdfFormFieldBox({
             box: {
                 x: centerX - width / 2,

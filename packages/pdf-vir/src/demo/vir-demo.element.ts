@@ -1,76 +1,49 @@
 /// <reference types="vite/client" />
 
-import {assert, assertWrap, check} from '@augment-vir/assert';
-import {
-    getObjectTypedValues,
-    omitObjectKeys,
-    removePrefix,
-    removeSuffix,
-} from '@augment-vir/common';
+import {assert, assertWrap} from '@augment-vir/assert';
+import {getObjectTypedValues, omitObjectKeys} from '@augment-vir/common';
 import {css, defineElement, html, listen, nothing, type HtmlInterpolation} from 'element-vir';
-import {SpaRouter} from 'spa-router-vir';
 import {
-    lucideIcons,
     ViraButton,
     ViraColorVariant,
     ViraDropdown,
     ViraEmphasis,
+    viraTheme,
+    ViraThemeSwitcher,
     type ViraDropdownOption,
 } from 'vira';
+import {pdfVirIcons} from '../icons.js';
+import {type PdfFormAssignee} from '../pdf-form-assignee.js';
 import {pdfFormFieldConfig, type PdfFormField} from '../pdf-form-field.js';
 import {findUnfilledRequiredPdfFormFields, type PdfFormValues} from '../pdf-form-value.js';
 import {PdfVirFormEditor} from '../pdf-vir-form-editor.element.js';
 import {PdfVirFormFiller} from '../pdf-vir-form-filler.element.js';
 import {PdfVir} from '../pdf-vir.element.js';
-import {createDemoLocalDbClient, type DemoLocalDbClient} from './local-db.client.js';
-
-enum DemoMode {
-    Viewer = 'viewer',
-    FormEditor = 'form-editor',
-    FormFiller = 'form-filler',
-}
+import {
+    createDemoFrontendState,
+    DemoMode,
+    demoRouter,
+    type DemoFrontendState,
+} from './demo-frontend-state.js';
 
 const demoModeLabels: Record<DemoMode, string> = {
     [DemoMode.Viewer]: 'View',
-    [DemoMode.FormEditor]: 'Edit',
+    [DemoMode.FormEditor]: 'Build',
     [DemoMode.FormFiller]: 'Fill',
 };
 
-const demoRouter = new SpaRouter<[DemoMode], undefined, undefined>({
-    /**
-     * Vite's base is `/` while developing and `/<repo-name>/` for the GitHub Pages build, but the
-     * router wants the bare segment with no slashes.
-     */
-    basePath: removeSuffix({
-        value: removePrefix({
-            value: import.meta.env.BASE_URL,
-            prefix: '/',
-        }),
-        suffix: '/',
-    }),
-    sanitizeRoute(rawRoute) {
-        return {
-            paths: [
-                check.isEnumValue(rawRoute.paths[0], DemoMode)
-                    ? rawRoute.paths[0]
-                    : DemoMode.Viewer,
-            ],
-            search: undefined,
-            hash: undefined,
-        };
-    },
-});
-
-/**
- * `lucideIcons.RotateCcw` carries no size of its own, so `ViraButton` would draw it at its own
- * default.
- */
-const resetIcon = {
-    ...lucideIcons.RotateCcw,
-    size: 16,
-};
-
 const committedDemoPath = '/demo.pdf';
+
+const demoAssignees: ReadonlyArray<PdfFormAssignee> = [
+    {
+        id: 'signer-1',
+        label: 'Signer 1',
+    },
+    {
+        id: 'signer-2',
+        label: 'Signer 2',
+    },
+];
 
 const extraPdfModules = import.meta.glob('../../www-static/extra-pdfs/*.pdf');
 
@@ -105,6 +78,8 @@ export const VirDemo = defineElement()({
             gap: 16px;
             box-sizing: border-box;
             font-family: sans-serif;
+            background-color: ${viraTheme.colors['theme-default'].background.value};
+            color: ${viraTheme.colors['theme-default'].foreground.value};
         }
 
         .controls {
@@ -122,7 +97,7 @@ export const VirDemo = defineElement()({
 
         .form-status {
             display: flex;
-            align-items: center;
+            align-items: flex-end;
             gap: 16px;
 
             & p {
@@ -139,34 +114,33 @@ export const VirDemo = defineElement()({
     state() {
         return {
             selectedPdf: committedDemoPath,
-            mode: demoRouter.readCurrentRoute().paths[0],
+            frontendState: undefined as undefined | DemoFrontendState,
             formFieldsByPdf: {} as Partial<Record<string, PdfFormField[]>>,
             formValuesByPdf: {} as Partial<Record<string, PdfFormValues>>,
             adoptedSignerName: '',
-            localDbClient: {
-                current: undefined as undefined | DemoLocalDbClient,
-            },
-            routeListener: {
-                current: undefined as undefined | (() => void),
-            },
+            assignees: demoAssignees,
+            fillingAssigneeId: demoAssignees[0]?.id,
         };
     },
-    init({state, updateState}) {
-        state.routeListener.current = demoRouter.listen(true, (route) => {
+    init({updateState}) {
+        void createDemoFrontendState().then((frontendState) => {
+            const savedValues = frontendState.value.localDbClient.value;
             updateState({
-                mode: route.paths[0],
-            });
-        });
-        void createDemoLocalDbClient().then((localDbClient) => {
-            state.localDbClient.current = localDbClient;
-            updateState({
-                formFieldsByPdf: localDbClient.value.formFields ?? {},
-                formValuesByPdf: localDbClient.value.formValues ?? {},
-                adoptedSignerName: localDbClient.value.adoptedSignerName || '',
+                frontendState,
+                formFieldsByPdf: savedValues.formFields ?? {},
+                formValuesByPdf: savedValues.formValues ?? {},
+                adoptedSignerName: savedValues.adoptedSignerName || '',
+                assignees: savedValues.assignees ?? demoAssignees,
             });
         });
     },
     render({state, updateState}) {
+        if (!state.frontendState) {
+            return nothing;
+        }
+        /** Aliased so the narrowing above holds inside the callbacks below. */
+        const {localDbClient, themeClient, currentRoute} = state.frontendState.value;
+
         const modeTemplates: Record<DemoMode, () => HtmlInterpolation> = {
             [DemoMode.Viewer]: renderViewer,
             [DemoMode.FormEditor]() {
@@ -174,9 +148,15 @@ export const VirDemo = defineElement()({
                     <${PdfVirFormEditor.assign({
                         pdfSource: state.selectedPdf,
                         pdfiumWasmUrl: '/pdfium.wasm',
-                        enableZoomControls: true,
                         fields: state.formFieldsByPdf[state.selectedPdf] ?? [],
+                        assignees: state.assignees,
                     })}
+                        ${listen(PdfVirFormEditor.events.assigneesChange, (event) => {
+                            updateState({
+                                assignees: event.detail,
+                            });
+                            void localDbClient.set.assignees(event.detail);
+                        })}
                         ${listen(PdfVirFormEditor.events.fieldsChange, (event) => {
                             const formFieldsByPdf = {
                                 ...state.formFieldsByPdf,
@@ -185,7 +165,7 @@ export const VirDemo = defineElement()({
                             updateState({
                                 formFieldsByPdf,
                             });
-                            void state.localDbClient.current?.set.formFields(formFieldsByPdf);
+                            void localDbClient.set.formFields(formFieldsByPdf);
                         })}
                     ></${PdfVirFormEditor}>
                 `;
@@ -196,6 +176,7 @@ export const VirDemo = defineElement()({
                 const unfilledCount = findUnfilledRequiredPdfFormFields({
                     fields,
                     values,
+                    assigneeId: state.fillingAssigneeId,
                 }).length;
 
                 function saveValues(newValues: PdfFormValues) {
@@ -206,17 +187,37 @@ export const VirDemo = defineElement()({
                     updateState({
                         formValuesByPdf,
                     });
-                    void state.localDbClient.current?.set.formValues(formValuesByPdf);
+                    void localDbClient.set.formValues(formValuesByPdf);
                 }
 
                 return html`
                     <div class="form-status">
+                        <${ViraDropdown.assign({
+                            label: 'Fill as',
+                            options: state.assignees.map((assignee) => {
+                                return {
+                                    value: assignee.id,
+                                    label: assignee.label,
+                                };
+                            }),
+                            selected: state.fillingAssigneeId
+                                ? [
+                                      state.fillingAssigneeId,
+                                  ]
+                                : [],
+                        })}
+                            ${listen(ViraDropdown.events.selectedValuesChange, (event) => {
+                                updateState({
+                                    fillingAssigneeId: event.detail[0],
+                                });
+                            })}
+                        ></${ViraDropdown}>
                         <p>
                             ${fields.length
                                 ? unfilledCount
                                     ? `${unfilledCount} required field(s) left to fill.`
                                     : 'All required fields are filled.'
-                                : 'Add fields in the form editor first.'}
+                                : 'Add fields in Build mode first.'}
                         </p>
                         ${state.adoptedSignerName
                             ? html`
@@ -227,7 +228,7 @@ export const VirDemo = defineElement()({
                                           updateState({
                                               adoptedSignerName: '',
                                           });
-                                          void state.localDbClient.current?.delete.adoptedSignerName();
+                                          void localDbClient.delete.adoptedSignerName();
                                           /**
                                            * Stamps of the old signature would no longer match the
                                            * new one.
@@ -255,15 +256,16 @@ export const VirDemo = defineElement()({
                         fields,
                         values,
                         adoptedSignerName: state.adoptedSignerName,
+                        assigneeId: state.fillingAssigneeId,
                     })}
                         ${listen(PdfVirFormFiller.events.valuesChange, (event) => {
-                            saveValues(event.detail);
+                            saveValues(event.detail.values);
                         })}
                         ${listen(PdfVirFormFiller.events.signerNameAdopt, (event) => {
                             updateState({
                                 adoptedSignerName: event.detail,
                             });
-                            void state.localDbClient.current?.set.adoptedSignerName(event.detail);
+                            void localDbClient.set.adoptedSignerName(event.detail);
                         })}
                     ></${PdfVirFormFiller}>
                 `;
@@ -326,7 +328,7 @@ export const VirDemo = defineElement()({
                         };
                     }),
                     selected: [
-                        state.mode,
+                        currentRoute.paths[0],
                     ],
                 })}
                     ${listen(ViraDropdown.events.selectedValuesChange, (event) => {
@@ -338,7 +340,7 @@ export const VirDemo = defineElement()({
                 ></${ViraDropdown}>
                 <${ViraButton.assign({
                     text: 'Reset demo',
-                    icon: resetIcon,
+                    icon: pdfVirIcons.reset,
                     color: ViraColorVariant.Danger,
                     buttonEmphasis: ViraEmphasis.Subtle,
                 })}
@@ -347,15 +349,23 @@ export const VirDemo = defineElement()({
                             formFieldsByPdf: {},
                             formValuesByPdf: {},
                             adoptedSignerName: '',
+                            assignees: demoAssignees,
+                            fillingAssigneeId: demoAssignees[0]?.id,
                         });
-                        void state.localDbClient.current?.clear();
+                        void localDbClient.delete.formFields();
+                        void localDbClient.delete.formValues();
+                        void localDbClient.delete.adoptedSignerName();
+                        void localDbClient.delete.assignees();
                     })}
                 ></${ViraButton}>
+                <${ViraThemeSwitcher.assign({
+                    themeClient,
+                })}></${ViraThemeSwitcher}>
             </div>
-            ${modeTemplates[state.mode]()}
+            ${modeTemplates[currentRoute.paths[0]]()}
         `;
     },
     cleanup({state}) {
-        state.routeListener.current?.();
+        state.frontendState?.destroy();
     },
 });

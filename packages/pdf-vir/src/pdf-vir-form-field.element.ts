@@ -13,7 +13,23 @@ import {
     nothing,
     onDomCreated,
 } from 'element-vir';
-import {lucideIcons, noUserSelect, ViraCheckbox, ViraIcon, viraShadows} from 'vira';
+import {
+    noUserSelect,
+    ViraButton,
+    ViraCheckbox,
+    ViraColorVariant,
+    ViraDropdown,
+    ViraEmphasis,
+    ViraIcon,
+    viraShadows,
+    viraTheme,
+} from 'vira';
+import {pdfVirIcons} from './icons.js';
+import {
+    getPdfFormAssigneeColor,
+    resolvePdfFormAssigneeColors,
+    type PdfFormAssignee,
+} from './pdf-form-assignee.js';
 import {pdfFormCssVars} from './pdf-form-css-vars.js';
 import {
     movePdfFormFieldBox,
@@ -42,6 +58,9 @@ const minFieldSizePx = 12;
  */
 const toolbarFlipThreshold = 0.05;
 
+/** `ViraDropdown` option values must be strings, so this stands in for an unset `assigneeId`. */
+const everyoneOptionValue = '';
+
 /**
  * Every piece of text {@link PdfVirFormField} renders.
  *
@@ -57,6 +76,10 @@ export type PdfVirFormFieldI18n = typeof defaultPdfVirFormFieldI18n;
 export const defaultPdfVirFormFieldI18n = {
     required: 'Required?',
     delete: 'Delete',
+    /** Shown in the assignee dropdown of a field whose assignee is not in the `assignees` list. */
+    assigneePlaceholder: 'Assignee',
+    /** The assignee option for a field assigned to no one, which anyone can fill. */
+    everyone: 'Everyone',
     /** The name each palette block is drawn with, and the title of each placed field. */
     fieldTypeLabels: mapObjectValues(pdfFormFieldConfig, (type, config) => {
         return config.label;
@@ -78,6 +101,11 @@ export const PdfVirFormField = defineElement<
         field: Readonly<PdfFormField>;
         isSelected: boolean;
     } & PartialWithUndefined<{
+        /**
+         * Colors the field by its assignee and adds an assignee dropdown to its toolbar. Omit or
+         * leave empty to draw every field in the default colors with no dropdown.
+         */
+        assignees: ReadonlyArray<Readonly<PdfFormAssignee>>;
         i18n: Readonly<PartialWithUndefined<PdfVirFormFieldI18n>>;
     }>
 >()({
@@ -88,6 +116,9 @@ export const PdfVirFormField = defineElement<
         },
         'pdf-vir-form-field-required'({inputs}) {
             return inputs.field.isRequired;
+        },
+        'pdf-vir-form-field-alt-pressed'({state}) {
+            return state.isAltPressed;
         },
     },
     styles({hostClasses}) {
@@ -129,6 +160,10 @@ export const PdfVirFormField = defineElement<
                 border-color: ${pdfFormCssVars['pdf-vir-red-accent-color'].value};
             }
 
+            ${hostClasses['pdf-vir-form-field-alt-pressed'].selector} {
+                cursor: copy;
+            }
+
             .field {
                 display: flex;
                 justify-content: center;
@@ -136,6 +171,8 @@ export const PdfVirFormField = defineElement<
                 width: 100%;
                 height: 100%;
                 anchor-name: --pdf-vir-form-field;
+                /* The selected border already marks the focused field. */
+                outline: none;
             }
 
             .icon-wrapper {
@@ -176,9 +213,10 @@ export const PdfVirFormField = defineElement<
                 gap: 12px;
                 padding: 4px 8px;
                 box-sizing: border-box;
-                background-color: ${pdfFormCssVars['pdf-vir-page-background-color'].value};
-                color: ${pdfFormCssVars['pdf-vir-page-text-color'].value};
-                border: 1px solid ${pdfFormCssVars['pdf-vir-page-border-color'].value};
+                background-color: ${viraTheme.colors['theme-default'].background.value};
+                color: ${viraTheme.colors['theme-default'].foreground.value};
+                border: 1px solid
+                    ${viraTheme.colors['vira-grey-behind-bg-decoration'].background.value};
                 border-radius: 6px;
                 ${viraShadows.menuShadow}
                 white-space: nowrap;
@@ -188,24 +226,6 @@ export const PdfVirFormField = defineElement<
                 &.below {
                     position-area: bottom span-right;
                     margin: 6px 0 0;
-                }
-            }
-
-            .delete-button {
-                display: flex;
-                padding: 4px;
-                border: none;
-                border-radius: 4px;
-                background: none;
-                color: ${pdfFormCssVars['pdf-vir-red-accent-color'].value};
-                cursor: pointer;
-
-                &:hover {
-                    background-color: color-mix(
-                        in srgb,
-                        ${pdfFormCssVars['pdf-vir-red-accent-color'].value} 10%,
-                        transparent
-                    );
                 }
             }
 
@@ -226,9 +246,19 @@ export const PdfVirFormField = defineElement<
         fieldChange: defineElementEvent<PdfFormField>(),
         fieldSelect: defineElementEvent<void>(),
         fieldDelete: defineElementEvent<void>(),
+        /**
+         * Emitted in place of `fieldChange` on the first move of an Alt (Option) drag. The detail
+         * is this field moved, and a copy of the field with a new id should be added where it was.
+         */
+        fieldDuplicate: defineElementEvent<PdfFormField>(),
     },
     state() {
         return {
+            /** Shows that an Alt (Option) drag duplicates the field. */
+            isAltPressed: false,
+            keyListeners: {
+                current: undefined as undefined | AbortController,
+            },
             gesture: {
                 current: undefined as
                     | undefined
@@ -240,12 +270,46 @@ export const PdfVirFormField = defineElement<
                           startBox: PdfFormFieldBox;
                           pageWidthPx: number;
                           pageHeightPx: number;
+                          isDuplicating: boolean;
                       },
             },
         };
     },
-    render({inputs, state, host, dispatch, events}) {
+    init({state, updateState}) {
+        const abortController = new AbortController();
+        state.keyListeners.current = abortController;
+
+        function updateAltPressed(event: Readonly<KeyboardEvent>) {
+            updateState({
+                isAltPressed: event.altKey,
+            });
+        }
+
+        globalThis.addEventListener('keydown', updateAltPressed, {
+            signal: abortController.signal,
+        });
+        globalThis.addEventListener('keyup', updateAltPressed, {
+            signal: abortController.signal,
+        });
+        /* A key released while the window is in the background never sends its `keyup`. */
+        globalThis.addEventListener(
+            'blur',
+            () => {
+                updateState({
+                    isAltPressed: false,
+                });
+            },
+            {
+                signal: abortController.signal,
+            },
+        );
+    },
+    cleanup({state}) {
+        state.keyListeners.current?.abort();
+    },
+    render({inputs, state, host, updateState, dispatch, events}) {
         const i18n = mergeDefinedProperties(defaultPdfVirFormFieldI18n, inputs.i18n);
+        const resolvedAssigneeColors = resolvePdfFormAssigneeColors(inputs.assignees || []);
 
         function startGesture(type: PdfFormFieldGesture, event: PointerEvent) {
             if (event.button !== 0) {
@@ -256,7 +320,12 @@ export const PdfVirFormField = defineElement<
             event.stopPropagation();
 
             const pageRect = assertWrap.isDefined(host.parentElement).getBoundingClientRect();
-            assertWrap.instanceOf(event.currentTarget, Element).setPointerCapture(event.pointerId);
+            const target = assertWrap.instanceOf(event.currentTarget, Element);
+            target.setPointerCapture(event.pointerId);
+            /* Canceling the press above also cancels the focus that Delete and Backspace need. */
+            assertWrap.instanceOf(target.closest('.field'), HTMLElement).focus({
+                preventScroll: true,
+            });
             state.gesture.current = {
                 type,
                 pointerId: event.pointerId,
@@ -270,6 +339,7 @@ export const PdfVirFormField = defineElement<
                 },
                 pageWidthPx: pageRect.width,
                 pageHeightPx: pageRect.height,
+                isDuplicating: type === PdfFormFieldGesture.Move && event.altKey,
             };
 
             if (!inputs.isSelected) {
@@ -308,14 +378,25 @@ export const PdfVirFormField = defineElement<
                 },
             };
 
-            dispatch(
-                new events.fieldChange({
-                    detail: {
-                        ...inputs.field,
-                        ...gestureHandlers[gesture.type](),
-                    },
-                }),
-            );
+            const newField = {
+                ...inputs.field,
+                ...gestureHandlers[gesture.type](),
+            };
+
+            if (gesture.isDuplicating) {
+                gesture.isDuplicating = false;
+                dispatch(
+                    new events.fieldDuplicate({
+                        detail: newField,
+                    }),
+                );
+            } else {
+                dispatch(
+                    new events.fieldChange({
+                        detail: newField,
+                    }),
+                );
+            }
         }
 
         function endGesture(event: PointerEvent) {
@@ -329,13 +410,62 @@ export const PdfVirFormField = defineElement<
         host.style.width = `${inputs.field.width * 100}%`;
         host.style.height = `${inputs.field.height * 100}%`;
 
+        if (inputs.assignees?.length) {
+            const color = getPdfFormAssigneeColor({
+                assignees: inputs.assignees,
+                assigneeId: inputs.field.assigneeId,
+            });
+            host.style.setProperty(
+                pdfFormCssVars['pdf-vir-field-accent-color'].name.cssText,
+                color.accent.cssText,
+            );
+            host.style.setProperty(
+                pdfFormCssVars['pdf-vir-field-text-color'].name.cssText,
+                color.text.cssText,
+            );
+        } else {
+            host.style.removeProperty(pdfFormCssVars['pdf-vir-field-accent-color'].name.cssText);
+            host.style.removeProperty(pdfFormCssVars['pdf-vir-field-text-color'].name.cssText);
+        }
+
         return html`
             <div
                 class="field"
+                tabindex="0"
+                ${listen('focus', () => {
+                    if (!inputs.isSelected) {
+                        dispatch(
+                            new events.fieldSelect({
+                                detail: undefined,
+                            }),
+                        );
+                    }
+                })}
+                ${listen('keydown', (event) => {
+                    /* Keys pressed inside the toolbar's controls are theirs. */
+                    if (
+                        event.target === event.currentTarget &&
+                        (event.key === 'Delete' || event.key === 'Backspace')
+                    ) {
+                        event.preventDefault();
+                        dispatch(
+                            new events.fieldDelete({
+                                detail: undefined,
+                            }),
+                        );
+                    }
+                })}
                 ${listen('pointerdown', (event) => {
                     startGesture(PdfFormFieldGesture.Move, event);
                 })}
-                ${listen('pointermove', updateGesture)}
+                ${listen('pointermove', (event) => {
+                    if (event.altKey !== state.isAltPressed) {
+                        updateState({
+                            isAltPressed: event.altKey,
+                        });
+                    }
+                    updateGesture(event);
+                })}
                 ${listen('pointerup', endGesture)}
                 ${listen('pointercancel', endGesture)}
                 ${listen('click', (event) => {
@@ -368,8 +498,11 @@ export const PdfVirFormField = defineElement<
                                   event.stopPropagation();
                               })}
                           >
-                              <button
-                                  class="delete-button"
+                              <${ViraButton.assign({
+                                  icon: pdfVirIcons.trash,
+                                  buttonEmphasis: ViraEmphasis.Subtle,
+                                  color: ViraColorVariant.Danger,
+                              })}
                                   title=${i18n.delete}
                                   ${listen('click', () => {
                                       dispatch(
@@ -378,11 +511,61 @@ export const PdfVirFormField = defineElement<
                                           }),
                                       );
                                   })}
-                              >
-                                  <${ViraIcon.assign({
-                                      icon: lucideIcons.Trash,
-                                  })}></${ViraIcon}>
-                              </button>
+                              ></${ViraButton}>
+                              ${inputs.assignees?.length
+                                  ? html`
+                                        <${ViraDropdown.assign({
+                                            options: [
+                                                {
+                                                    value: everyoneOptionValue,
+                                                    label: i18n.everyone,
+                                                    labelTemplate: html`
+                                                        <span
+                                                            style=${css`
+                                                                color: ${viraTheme.colors[
+                                                                    'vira-grey-foreground-placeholder'
+                                                                ].foreground.value};
+                                                            `}
+                                                        >
+                                                            ${i18n.everyone}
+                                                        </span>
+                                                    `,
+                                                    icon: pdfVirIcons.everyoneDot,
+                                                },
+                                                ...inputs.assignees.map((assignee, index) => {
+                                                    return {
+                                                        value: assignee.id,
+                                                        label: assignee.label,
+                                                        icon: pdfVirIcons.assigneeDots[
+                                                            assertWrap.isDefined(
+                                                                resolvedAssigneeColors[index],
+                                                            )
+                                                        ],
+                                                    };
+                                                }),
+                                            ],
+                                            selected: [
+                                                inputs.field.assigneeId || everyoneOptionValue,
+                                            ],
+                                            placeholder: i18n.assigneePlaceholder,
+                                        })}
+                                            ${listen(
+                                                ViraDropdown.events.selectedValuesChange,
+                                                (event) => {
+                                                    dispatch(
+                                                        new events.fieldChange({
+                                                            detail: {
+                                                                ...inputs.field,
+                                                                assigneeId:
+                                                                    event.detail[0] || undefined,
+                                                            },
+                                                        }),
+                                                    );
+                                                },
+                                            )}
+                                        ></${ViraDropdown}>
+                                    `
+                                  : nothing}
                               <${ViraCheckbox.assign({
                                   value: inputs.field.isRequired,
                                   label: i18n.required,

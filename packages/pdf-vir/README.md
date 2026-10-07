@@ -54,3 +54,82 @@ Pass `enableZoomControls: true` to render a floating Safari-style zoom toolbar (
 ```
 
 Zoom immediately scales the already-rendered canvases with CSS, then re-renders the pages on screen at the new zoom level once zooming settles, so they end up sharp instead of stretched. Off-screen pages re-render when they scroll back into view.
+
+### Forms
+
+`PdfVirFormEditor` lets a user build a fillable form on top of a PDF. They drag fields (text, date, checkbox, circle one, signature, initials) from a palette onto the pages, then move, resize, or mark them required. `PdfVirFormFiller` renders those same fields for someone to fill in.
+
+Both elements are controlled: they only emit events with the full new data. Nothing changes on screen until you pass that data back in, so you decide where it's stored.
+
+Pass `assignees` to the editor to let fields be assigned to different signers. Then pass an `assigneeId` to the filler to show only that signer's fields and the unassigned ones.
+
+<!-- example-link: src/readme-examples/form.example.ts -->
+
+```TypeScript
+import {defineElement, html, listen} from 'element-vir';
+import {
+    PdfVirFormEditor,
+    PdfVirFormFiller,
+    type PdfFormAssignee,
+    type PdfFormField,
+    type PdfFormValues,
+} from 'pdf-vir';
+
+export const MyFormApp = defineElement()({
+    tagName: 'my-form-app',
+    state() {
+        return {
+            fields: [] as PdfFormField[],
+            assignees: [
+                {
+                    id: 'signer-1',
+                    label: 'Signer 1',
+                },
+            ] as PdfFormAssignee[],
+            values: {} as PdfFormValues,
+            adoptedSignerName: '',
+        };
+    },
+    render({state, updateState}) {
+        return html`
+            <${PdfVirFormEditor.assign({
+                pdfSource: '/my-file.pdf',
+                pdfiumWasmUrl: '/pdfium.wasm',
+                fields: state.fields,
+                assignees: state.assignees,
+            })}
+                ${listen(PdfVirFormEditor.events.fieldsChange, (event) => {
+                    updateState({
+                        fields: event.detail,
+                    });
+                })}
+                ${listen(PdfVirFormEditor.events.assigneesChange, (event) => {
+                    updateState({
+                        assignees: event.detail,
+                    });
+                })}
+            ></${PdfVirFormEditor}>
+
+            <${PdfVirFormFiller.assign({
+                pdfSource: '/my-file.pdf',
+                pdfiumWasmUrl: '/pdfium.wasm',
+                fields: state.fields,
+                values: state.values,
+                adoptedSignerName: state.adoptedSignerName,
+                assigneeId: 'signer-1',
+            })}
+                ${listen(PdfVirFormFiller.events.valuesChange, (event) => {
+                    updateState({
+                        values: event.detail.values,
+                    });
+                })}
+                ${listen(PdfVirFormFiller.events.signerNameAdopt, (event) => {
+                    updateState({
+                        adoptedSignerName: event.detail,
+                    });
+                })}
+            ></${PdfVirFormFiller}>
+        `;
+    },
+});
+```

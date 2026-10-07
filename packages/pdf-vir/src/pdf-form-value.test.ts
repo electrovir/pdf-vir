@@ -114,6 +114,33 @@ describe(findUnfilledRequiredPdfFormFields.name, () => {
             ],
         );
     });
+    it("only checks the assignee's own and unassigned fields", () => {
+        const ownField = createField({
+            id: 'own',
+            type: PdfFormFieldType.Signature,
+            assigneeId: 'signer-1',
+        });
+
+        assert.deepEquals(
+            findUnfilledRequiredPdfFormFields({
+                fields: [
+                    ownField,
+                    createField({
+                        id: 'other',
+                        type: PdfFormFieldType.Signature,
+                        assigneeId: 'signer-2',
+                    }),
+                    textField,
+                ],
+                values: {},
+                assigneeId: 'signer-1',
+            }),
+            [
+                ownField,
+                textField,
+            ],
+        );
+    });
 });
 
 describe(areRequiredPdfFormFieldsFilled.name, () => {

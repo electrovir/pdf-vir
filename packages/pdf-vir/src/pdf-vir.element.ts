@@ -26,14 +26,8 @@ import {
     repeat,
     unsafeCSS,
 } from 'element-vir';
-import {
-    LoaderAnimated24Icon,
-    lucideIcons,
-    viraColorPalette,
-    ViraIcon,
-    viraShadows,
-    viraTheme,
-} from 'vira';
+import {viraColorPalette, ViraIcon, viraShadows, viraTheme} from 'vira';
+import {pdfVirIcons} from './icons.js';
 import {
     computePageLayout,
     computePageSpacerHeights,
@@ -1709,7 +1703,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                               }}
                           >
                               <${ViraIcon.assign({
-                                  icon: lucideIcons.ZoomOut,
+                                  icon: pdfVirIcons.zoomOut,
                               })}></${ViraIcon}>
                           </button>
                           <button
@@ -1726,7 +1720,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                               }}
                           >
                               <${ViraIcon.assign({
-                                  icon: lucideIcons.ZoomIn,
+                                  icon: pdfVirIcons.zoomIn,
                               })}></${ViraIcon}>
                           </button>
                           <div class="zoom-divider"></div>
@@ -1744,7 +1738,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                               }}
                           >
                               <${ViraIcon.assign({
-                                  icon: lucideIcons.RotateCcw,
+                                  icon: pdfVirIcons.resetZoom,
                               })}></${ViraIcon}>
                           </button>
                       </div>
@@ -1761,7 +1755,7 @@ export const PdfVir = defineElement<PdfVirInputs>()({
                         style=${ifDefined(inputs.stylePassthrough?.loader)}
                     >
                         <${ViraIcon.assign({
-                            icon: LoaderAnimated24Icon,
+                            icon: pdfVirIcons.loader,
                         })}></${ViraIcon}>
                     </div>
                 </div>

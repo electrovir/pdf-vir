@@ -1,21 +1,25 @@
 // cspell:word segoe roundhand
+import {unsafeCSS} from 'element-vir';
 import {defineCssVars} from 'lit-css-vars';
-import {viraColorPalette} from 'vira';
+import {viraColorPalette, viraTheme} from 'vira';
 
 /**
  * Every CSS var that the form editor and form filler draw themselves with, along with its default.
  * Set any of these on an ancestor element to restyle the fields: custom properties inherit into
  * shadow roots, so one declaration reaches every field on every page.
  *
- * The color defaults come from the raw Vira palette rather than the theme because they are drawn on
- * top of a PDF page, which is always light no matter what the rest of the app is doing: palette
- * colors are fixed hues and only the theme's semantic colors flip in dark mode.
+ * The color defaults are fixed light mode colors rather than theme CSS vars because they are drawn
+ * on top of a PDF page, which is always light no matter what the rest of the app is doing.
  *
  * @category Internal
  */
 export const pdfFormCssVars = defineCssVars({
-    'pdf-vir-field-accent-color': viraColorPalette['vira-blue-600'].value,
-    'pdf-vir-field-text-color': viraColorPalette['vira-blue-750'].value,
+    'pdf-vir-field-accent-color': unsafeCSS(
+        viraTheme.colors['vira-blue-foreground-header'].foreground.default,
+    ),
+    'pdf-vir-field-text-color': unsafeCSS(
+        viraTheme.colors['vira-blue-foreground-body'].foreground.default,
+    ),
     'pdf-vir-red-accent-color': viraColorPalette['vira-red-650'].value,
     'pdf-vir-page-background-color': viraColorPalette['vira-grey-100'].value,
     'pdf-vir-page-text-color': viraColorPalette['vira-grey-1000'].value,

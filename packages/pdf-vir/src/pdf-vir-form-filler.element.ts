@@ -5,8 +5,13 @@ import {
 } from '@augment-vir/common';
 import {css, defineElement, defineElementEvent, html, listen, nothing, repeat} from 'element-vir';
 import {ViraModal} from 'vira';
+import {canPdfFormAssigneeFill} from './pdf-form-assignee.js';
 import {pdfFormFieldConfig, type PdfFormField} from './pdf-form-field.js';
-import {isPdfFormFieldFilled, type PdfFormValues} from './pdf-form-value.js';
+import {
+    findUnfilledRequiredPdfFormFields,
+    isPdfFormFieldFilled,
+    type PdfFormValues,
+} from './pdf-form-value.js';
 import {
     defaultPdfVirFillableFieldI18n,
     PdfVirFillableField,
@@ -42,6 +47,12 @@ export type PdfVirFormFillerInputs = Omit<PdfVirInputs, 'renderPageOverlay'> & {
          */
         useExternalSignaturePrompt: boolean;
         /**
+         * The `PdfFormAssignee.id` of who is filling the form. Fields assigned to anyone else are
+         * not shown at all. Fields without an assignee can be filled by anyone. Omit to show and
+         * let every field be filled.
+         */
+        assigneeId: string;
+        /**
          * Overrides for any of the strings this element renders. Omitted entries keep their
          * {@link defaultPdfVirFormFillerI18n} value.
          */
@@ -69,9 +80,9 @@ export const defaultPdfVirFormFillerI18n = {
 
 /**
  * Fills out a form built with `PdfVirFormEditor`. Clicking a stamped field clears it. Required
- * fields that are still empty get a dashed red border. Use `areRequiredPdfFormFieldsFilled` or
- * `findUnfilledRequiredPdfFormFields` on the same `fields` and `values` to check if the form is
- * complete.
+ * fields that are still empty get a dashed red border. `valuesChange` carries the required fields
+ * that are still empty after the edit. Before any edit, use `findUnfilledRequiredPdfFormFields` on
+ * the same `fields`, `values`, and `assigneeId` to get them.
  *
  * Controlled: every edit only emits `valuesChange` with the full new values, and adopting a name
  * only emits `signerNameAdopt`. Nothing changes on screen until those are passed back in as
@@ -96,7 +107,14 @@ export const PdfVirFormFiller = defineElement<PdfVirFormFillerInputs>()({
         }
     `,
     events: {
-        valuesChange: defineElementEvent<PdfFormValues>(),
+        valuesChange: defineElementEvent<{
+            values: PdfFormValues;
+            /**
+             * The required fields that `assigneeId` can fill and that are still empty in `values`,
+             * from `findUnfilledRequiredPdfFormFields`. Empty once the form is complete.
+             */
+            unfilledRequiredFields: Readonly<PdfFormField>[];
+        }>(),
         signerNameAdopt: defineElementEvent<string>(),
         /**
          * Fired with the clicked field when a signature or initials field is clicked while there is
@@ -116,7 +134,14 @@ export const PdfVirFormFiller = defineElement<PdfVirFormFillerInputs>()({
         function emitValues(values: PdfFormValues) {
             dispatch(
                 new events.valuesChange({
-                    detail: values,
+                    detail: {
+                        values,
+                        unfilledRequiredFields: findUnfilledRequiredPdfFormFields({
+                            fields: inputs.fields,
+                            values,
+                            assigneeId: inputs.assigneeId,
+                        }),
+                    },
                 }),
             );
         }
@@ -164,6 +189,7 @@ export const PdfVirFormFiller = defineElement<PdfVirFormFillerInputs>()({
                     'values',
                     'adoptedSignerName',
                     'useExternalSignaturePrompt',
+                    'assigneeId',
                     'i18n',
                 ]),
                 renderPageOverlay({pageNumber}) {
@@ -176,7 +202,13 @@ export const PdfVirFormFiller = defineElement<PdfVirFormFillerInputs>()({
                         >
                             ${repeat(
                                 inputs.fields.filter((field) => {
-                                    return field.pageNumber === pageNumber;
+                                    return (
+                                        field.pageNumber === pageNumber &&
+                                        canPdfFormAssigneeFill({
+                                            field,
+                                            assigneeId: inputs.assigneeId,
+                                        })
+                                    );
                                 }),
                                 (field) => field.id,
                                 (field) => {

@@ -4,6 +4,7 @@ import {
     getObjectTypedValues,
     mergeDefinedProperties,
     omitObjectKeys,
+    randomString,
     type PartialWithUndefined,
 } from '@augment-vir/common';
 import {
@@ -17,7 +18,6 @@ import {
     repeat,
 } from 'element-vir';
 import {
-    lucideIcons,
     noUserSelect,
     ViraButton,
     ViraColorVariant,
@@ -27,21 +27,21 @@ import {
     viraShadows,
     viraTheme,
 } from 'vira';
+import {pdfVirIcons} from './icons.js';
 import {type PagePointSize} from './page-layout.js';
+import {getPdfFormAssigneeColor, type PdfFormAssignee} from './pdf-form-assignee.js';
 import {
     createPdfFormField,
     pdfFormFieldConfig,
     PdfFormFieldType,
     type PdfFormField,
 } from './pdf-form-field.js';
+import {
+    defaultPdfVirAssigneeListI18n,
+    PdfVirAssigneeList,
+} from './pdf-vir-assignee-list.element.js';
 import {defaultPdfVirFormFieldI18n, PdfVirFormField} from './pdf-vir-form-field.element.js';
 import {PdfVir, type PdfVirInputs} from './pdf-vir.element.js';
-
-/** `lucideIcons.Trash` carries no size of its own, so `ViraButton` would draw it at its own default. */
-const clearAllIcon = {
-    ...lucideIcons.Trash,
-    size: 16,
-};
 
 /**
  * The text {@link PdfVirFormEditor} renders when its `i18n` input leaves an entry out.
@@ -57,17 +57,26 @@ export const defaultPdfVirFormEditorI18n = {
         return `This removes all ${fieldCount} field${fieldCount === 1 ? '' : 's'} you've added and cannot be undone.`;
     },
     ...defaultPdfVirFormFieldI18n,
+    ...defaultPdfVirAssigneeListI18n,
 };
 
 /**
- * Inputs for {@link PdfVirFormEditor}. Everything except `fields` and `i18n` is passed straight
- * through to the inner {@link PdfVir}.
+ * Inputs for {@link PdfVirFormEditor}. Everything except `fields`, `assignees`, and `i18n` is passed
+ * straight through to the inner {@link PdfVir}.
  *
  * @category Internal
  */
 export type PdfVirFormEditorInputs = Omit<PdfVirInputs, 'renderPageOverlay'> & {
     fields: ReadonlyArray<Readonly<PdfFormField>>;
 } & PartialWithUndefined<{
+        /**
+         * Who fields can be assigned to. When given, the palette gets a list that picks the
+         * assignee of newly placed fields and can add, rename, recolor, and remove assignees
+         * through `assigneesChange`. Removing an assignee also emits `fieldsChange` with that
+         * assignee's fields unassigned. Each field's toolbar gets a dropdown that reassigns it, and
+         * fields are colored by assignee. Omit to place unassigned fields.
+         */
+        assignees: ReadonlyArray<Readonly<PdfFormAssignee>>;
         i18n: Readonly<PartialWithUndefined<PdfVirFormEditorI18n>>;
     }>;
 
@@ -81,84 +90,117 @@ export type PdfVirFormEditorI18n = typeof defaultPdfVirFormEditorI18n;
 
 /**
  * A form template builder: drag fields from the palette onto the PDF, then move, resize, delete, or
- * mark them required.
+ * mark them required. Alt (Option) dragging a placed field duplicates it, and Delete or Backspace
+ * removes the selected field.
  *
- * Controlled: every edit only emits `fieldsChange` with the full new field list. Nothing changes on
- * screen until that list is passed back in as `fields`.
+ * Controlled: every edit only emits `fieldsChange` or `assigneesChange` with the full new list.
+ * Nothing changes on screen until that list is passed back in as `fields` or `assignees`.
  *
  * @category Main
  */
 export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
     tagName: 'pdf-vir-form-editor',
-    styles: css`
-        :host {
-            display: flex;
-            gap: 16px;
-            box-sizing: border-box;
-            min-height: 0;
-        }
-
-        .palette {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            flex-shrink: 0;
-            width: 160px;
-        }
-
-        .palette-block {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 12px;
-            border: 1px solid ${viraTheme.colors['vira-grey-behind-bg-decoration'].background.value};
-            border-radius: 6px;
-            background-color: ${viraTheme.colors['theme-default'].background.value};
-            color: ${viraTheme.colors['theme-default'].foreground.value};
-            cursor: grab;
-            /* Stops a touch drag from scrolling the page instead of carrying the block. */
-            touch-action: none;
-            ${noUserSelect}
-
-            &:hover {
-                border-color: ${viraTheme.colors['vira-blue-foreground-non-body'].foreground.value};
+    cssVars: {
+        'pdf-vir-form-editor-palette-assignee-color':
+            viraTheme.colors['vira-grey-foreground-header'].foreground.value,
+    },
+    styles({cssVars}) {
+        return css`
+            :host {
+                display: flex;
+                gap: 16px;
+                box-sizing: border-box;
+                min-height: 0;
             }
-        }
 
-        .clear-confirmation-message {
-            margin: 0 0 16px;
-            max-width: 400px;
-        }
+            .palette {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                flex-shrink: 0;
+                width: 200px;
+            }
 
-        .clear-confirmation-buttons {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-        }
+            .clear-all-button {
+                align-self: center;
+            }
 
-        .drag-ghost {
-            position: fixed;
-            z-index: 1000;
-            transform: translate(-50%, -50%);
-            pointer-events: none;
-            cursor: grabbing;
-            opacity: 0.85;
-            ${viraShadows.menuShadow}
-        }
+            .palette-block {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 12px;
+                border: 1px solid
+                    ${viraTheme.colors['vira-grey-behind-bg-decoration'].background.value};
+                border-radius: 6px;
+                background-color: ${viraTheme.colors['theme-default'].background.value};
+                color: ${viraTheme.colors['theme-default'].foreground.value};
+                cursor: grab;
+                /* Stops a touch drag from scrolling the page instead of carrying the block. */
+                touch-action: none;
+                ${noUserSelect}
 
-        ${PdfVir} {
-            flex-grow: 1;
-            min-width: 0;
-            /* Drop the viewer's default fixed height so it stretches to this host's height. */
-            height: auto;
-        }
-    `,
+                &:hover {
+                    border-color: ${viraTheme.colors['vira-blue-foreground-non-body'].foreground
+                        .value};
+                }
+            }
+
+            .palette.has-assignees .palette-block {
+                border-left: 4px solid
+                    ${cssVars['pdf-vir-form-editor-palette-assignee-color'].value};
+            }
+
+            ${PdfVirAssigneeList} {
+                margin-bottom: 8px;
+            }
+
+            .clear-confirmation-message {
+                margin: 0 0 16px;
+                max-width: 400px;
+            }
+
+            .clear-confirmation-buttons {
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+            }
+
+            .drag-ghost {
+                position: fixed;
+                z-index: 1000;
+                transform: translate(-50%, -50%);
+                pointer-events: none;
+                cursor: grabbing;
+                opacity: 0.85;
+                ${viraShadows.menuShadow}
+            }
+
+            ${PdfVir} {
+                flex-grow: 1;
+                min-width: 0;
+                /* Drop the viewer's default fixed height so it stretches to this host's height. */
+                height: auto;
+            }
+        `;
+    },
     events: {
         fieldsChange: defineElementEvent<PdfFormField[]>(),
+        assigneesChange: defineElementEvent<PdfFormAssignee[]>(),
     },
     state() {
         return {
             selectedFieldId: undefined as undefined | string,
+            /**
+             * Wrapped so that picking "Everyone", an `assigneeId` of `undefined`, differs from
+             * picking nothing yet. Falls back to the first assignee while unset or no longer in
+             * `assignees`.
+             */
+            activeAssignee: undefined as
+                | undefined
+                | {
+                      assigneeId: string | undefined;
+                  },
             isClearConfirmationOpen: false,
             paletteDrag: undefined as
                 | undefined
@@ -168,6 +210,9 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                       clientY: number;
                   },
             paletteDragListeners: {
+                current: undefined as undefined | AbortController,
+            },
+            outsideClickListener: {
                 current: undefined as undefined | AbortController,
             },
             /**
@@ -185,8 +230,15 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
             },
         };
     },
-    render({inputs, state, updateState, dispatch, events}) {
+    render({inputs, state, updateState, dispatch, events, cssVars}) {
         const i18n = mergeDefinedProperties(defaultPdfVirFormEditorI18n, inputs.i18n);
+        const assignees = inputs.assignees || [];
+        const activeAssigneeId =
+            state.activeAssignee &&
+            (state.activeAssignee.assigneeId == undefined ||
+                assignees.some((assignee) => assignee.id === state.activeAssignee?.assigneeId))
+                ? state.activeAssignee.assigneeId
+                : assignees[0]?.id;
 
         function emitFields(fields: PdfFormField[]) {
             dispatch(
@@ -255,6 +307,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 pageSize: state.pageSizes.current[target.pageNumber],
                 centerX: (clientX - target.rect.left) / target.rect.width,
                 centerY: (clientY - target.rect.top) / target.rect.height,
+                assigneeId: activeAssigneeId,
             });
             emitFields([
                 ...inputs.fields,
@@ -390,6 +443,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 pageSize: state.pageSizes.current[sizingLayer.pageNumber],
                 centerX: 0.5,
                 centerY: 0.5,
+                assigneeId: activeAssigneeId,
             });
 
             return html`
@@ -411,6 +465,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                             height: 1,
                         },
                         isSelected: false,
+                        assignees,
                         i18n,
                     })}></${PdfVirFormField}>
                 </div>
@@ -418,7 +473,60 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
         }
 
         return html`
-            <div class="palette">
+            <div
+                class="palette ${assignees.length ? 'has-assignees' : ''}"
+                style=${css`
+                    ${cssVars['pdf-vir-form-editor-palette-assignee-color']
+                        .name}: ${getPdfFormAssigneeColor({
+                        assignees,
+                        assigneeId: activeAssigneeId,
+                    }).uiAccent};
+                `}
+            >
+                ${inputs.assignees
+                    ? html`
+                          <${PdfVirAssigneeList.assign({
+                              assignees: inputs.assignees,
+                              activeAssigneeId,
+                              i18n,
+                          })}
+                              ${listen(PdfVirAssigneeList.events.assigneesChange, (event) => {
+                                  const remainingIds = event.detail.map((assignee) => assignee.id);
+                                  const orphanedFields = inputs.fields.filter((field) => {
+                                      return (
+                                          !!field.assigneeId &&
+                                          assignees.some(
+                                              (assignee) => assignee.id === field.assigneeId,
+                                          ) &&
+                                          !remainingIds.includes(field.assigneeId)
+                                      );
+                                  });
+
+                                  if (orphanedFields.length) {
+                                      emitFields(
+                                          inputs.fields.map((field) => {
+                                              return orphanedFields.includes(field)
+                                                  ? omitObjectKeys(field, ['assigneeId'])
+                                                  : field;
+                                          }),
+                                      );
+                                  }
+                                  dispatch(
+                                      new events.assigneesChange({
+                                          detail: event.detail,
+                                      }),
+                                  );
+                              })}
+                              ${listen(PdfVirAssigneeList.events.activeAssigneeChange, (event) => {
+                                  updateState({
+                                      activeAssignee: {
+                                          assigneeId: event.detail,
+                                      },
+                                  });
+                              })}
+                          ></${PdfVirAssigneeList}>
+                      `
+                    : nothing}
                 ${getObjectTypedValues(PdfFormFieldType).map((type) => {
                     return html`
                         <div
@@ -436,11 +544,12 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 })}
                 <${ViraButton.assign({
                     text: i18n.clearAll,
-                    icon: clearAllIcon,
+                    icon: pdfVirIcons.trash,
                     color: ViraColorVariant.Danger,
                     buttonEmphasis: ViraEmphasis.Subtle,
                     isDisabled: !inputs.fields.length,
                 })}
+                    class="clear-all-button"
                     ${listen('click', () => {
                         updateState({
                             isClearConfirmationOpen: true,
@@ -451,6 +560,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
             <${PdfVir.assign({
                 ...omitObjectKeys(inputs, [
                     'fields',
+                    'assignees',
                     'i18n',
                 ]),
                 renderPageOverlay({pageNumber, pageSize}) {
@@ -483,6 +593,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                                         <${PdfVirFormField.assign({
                                             field,
                                             isSelected: field.id === state.selectedFieldId,
+                                            assignees,
                                             i18n,
                                         })}
                                             ${listen(
@@ -496,6 +607,23 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                                                                 : existingField;
                                                         }),
                                                     );
+                                                },
+                                            )}
+                                            ${listen(
+                                                PdfVirFormField.events.fieldDuplicate,
+                                                (event) => {
+                                                    emitFields([
+                                                        ...inputs.fields.map((existingField) => {
+                                                            return existingField.id ===
+                                                                event.detail.id
+                                                                ? event.detail
+                                                                : existingField;
+                                                        }),
+                                                        {
+                                                            ...field,
+                                                            id: randomString(),
+                                                        },
+                                                    ]);
                                                 },
                                             )}
                                             ${listen(PdfVirFormField.events.fieldSelect, () => {
@@ -548,7 +676,7 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                     ></${ViraButton}>
                     <${ViraButton.assign({
                         text: i18n.clearAll,
-                        icon: clearAllIcon,
+                        icon: pdfVirIcons.trash,
                         color: ViraColorVariant.Danger,
                     })}
                         ${listen('click', () => {
@@ -563,7 +691,37 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
             </${ViraModal}>
         `;
     },
+    init({state, updateState}) {
+        const abortController = new AbortController();
+        state.outsideClickListener.current = abortController;
+        /**
+         * Listens on the window so that a press anywhere on the page, even outside this element,
+         * deselects. Fields select themselves, so presses on any field are left alone.
+         */
+        window.addEventListener(
+            'pointerdown',
+            (event) => {
+                if (
+                    state.selectedFieldId &&
+                    !event.composedPath().some((target) => {
+                        return (
+                            target instanceof HTMLElement &&
+                            target.tagName === PdfVirFormField.tagName.toUpperCase()
+                        );
+                    })
+                ) {
+                    updateState({
+                        selectedFieldId: undefined,
+                    });
+                }
+            },
+            {
+                signal: abortController.signal,
+            },
+        );
+    },
     cleanup({state}) {
         state.paletteDragListeners.current?.abort();
+        state.outsideClickListener.current?.abort();
     },
 });
