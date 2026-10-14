@@ -110,6 +110,9 @@ export const PdfVirSignatureAdopt = defineElement<
                     isDisabled: !signatureText,
                 })}
                     ${listen('click', () => {
+                        if (!signatureText) {
+                            return;
+                        }
                         dispatch(
                             new events.signerNameAdopt({
                                 detail: signatureText,

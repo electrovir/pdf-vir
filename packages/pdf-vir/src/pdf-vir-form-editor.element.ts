@@ -822,6 +822,9 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                     isDisabled: !inputs.fields.length,
                 })}
                     ${listen('click', () => {
+                        if (!inputs.fields.length) {
+                            return;
+                        }
                         updateState({
                             selectedFieldIds: [],
                             isPreviewing: true,
@@ -899,6 +902,9 @@ export const PdfVirFormEditor = defineElement<PdfVirFormEditorInputs>()({
                 })}
                     class="clear-all-button"
                     ${listen('click', () => {
+                        if (!inputs.fields.length) {
+                            return;
+                        }
                         updateState({
                             isClearConfirmationOpen: true,
                         });
